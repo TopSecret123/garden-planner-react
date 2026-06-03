@@ -1,0 +1,33 @@
+.plant-edit-panel{
+  padding:12px 14px;
+  border-top:1px solid var(--border);
+  background:var(--bg);
+  overflow-y:auto;
+  flex-shrink:0;
+}
+.plant-edit-panel__title{
+  font-size:0.65rem;
+  font-weight:500;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--text-muted);
+  margin-bottom:8px;
+}
+.plant-edit-panel__emoji{
+  font-size:1.2rem;
+}
+.plant-edit-panel__delete{
+  width:100%;
+  margin-top:10px;
+  font-size:0.72rem;
+}
+.plant-edit-panel__field{
+  margin-bottom:9px;
+}
+.plant-edit-panel__label{
+  display:block;
+  font-size:0.7rem;
+  color:var(--text-muted);
+  font-weight:500;
+  margin-bottom:3px;
+}

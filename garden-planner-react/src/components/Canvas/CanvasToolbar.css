@@ -1,0 +1,9 @@
+.canvas-toolbar{
+  position:absolute;
+  top:12px;
+  left:12px;
+  display:flex;
+  gap:5px;
+  z-index:10;
+  flex-wrap:wrap;
+}

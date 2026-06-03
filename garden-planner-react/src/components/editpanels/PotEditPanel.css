@@ -1,0 +1,94 @@
+.pot-edit-panel{
+  padding:12px 14px;
+  border-top:1px solid var(--border);
+  background:var(--bg);
+  overflow-y:auto;
+  flex-shrink:0;
+  max-height:60vh;
+}
+.pot-edit-panel__title{
+  font-size:0.65rem;
+  font-weight:500;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--text-muted);
+  margin-bottom:8px;
+}
+.pot-edit-panel__emoji{
+  font-size:1.2rem;
+}
+.pot-edit-panel__row{
+  display:flex;
+  gap:7px;
+}
+.pot-edit-panel__modes{
+  display:flex;
+  gap:4px;
+}
+.pot-edit-panel__mode{
+  flex:1;
+  padding:6px 3px;
+  border:1px solid var(--border);
+  border-radius:5px;
+  background:var(--bg);
+  cursor:pointer;
+  font-size:0.65rem;
+  color:var(--text-muted);
+  transition:all .12s;
+}
+.pot-edit-panel__mode.is-active{
+  background:var(--accent-light);
+  color:var(--accent);
+}
+.pot-edit-panel__rotation{
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+.pot-edit-panel__range{
+  flex:1;
+  accent-color:var(--accent);
+}
+.pot-edit-panel__rotation-value{
+  font-size:0.76rem;
+  color:var(--text-muted);
+  width:34px;
+  text-align:right;
+}
+.pot-edit-panel__swatches{
+  display:flex;
+  gap:5px;
+  flex-wrap:wrap;
+}
+.pot-edit-panel__swatch{
+  width:26px;
+  height:26px;
+  border-radius:50%;
+  background:var(--swatch-color);
+  cursor:pointer;
+  border:2px solid transparent;
+  transition:all .12s;
+}
+.pot-edit-panel__swatch.is-selected{
+  border-color:var(--text);
+  transform:scale(1.1);
+}
+.pot-edit-panel__actions{
+  display:flex;
+  gap:6px;
+  margin-top:10px;
+}
+.pot-edit-panel__action{
+  flex:1;
+  font-size:0.72rem;
+}
+.pot-edit-panel__field{
+  margin-bottom:9px;
+}
+.pot-edit-panel__label{
+  display:block;
+  font-size:0.7rem;
+  color:var(--text-muted);
+  font-weight:500;
+  margin-bottom:3px;
+}

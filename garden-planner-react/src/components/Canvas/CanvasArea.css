@@ -1,0 +1,15 @@
+.canvas-area{
+  flex:1;
+  position:relative;
+  overflow:hidden;
+  background:var(--canvas-bg);
+  background-image:radial-gradient(circle at 1px 1px,var(--canvas-dot) 1px,transparent 0);
+  background-size:24px 24px;
+  transition:background .25s;
+}
+.canvas-area__canvas{
+  position:absolute;
+  top:0;
+  left:0;
+  touch-action:none;
+}

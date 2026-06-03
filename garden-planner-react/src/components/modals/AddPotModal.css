@@ -1,0 +1,110 @@
+.add-pot-modal__overlay{
+  position:fixed;
+  inset:0;
+  background:rgba(0,0,0,.45);
+  z-index:100;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:16px;
+  backdrop-filter:blur(2px);
+}
+.add-pot-modal{
+  background:var(--panel);
+  border-radius:14px;
+  padding:24px;
+  width:100%;
+  max-width:460px;
+  box-shadow:0 20px 60px rgba(0,0,0,.25);
+  border:1px solid var(--border);
+  max-height:90vh;
+  overflow-y:auto;
+}
+.add-pot-modal__title{
+  font-family:var(--font-display);
+  font-size:1.25rem;
+  margin-bottom:16px;
+}
+.add-pot-modal__field{
+  margin-bottom:9px;
+}
+.add-pot-modal__label{
+  display:block;
+  font-size:0.7rem;
+  color:var(--text-muted);
+  font-weight:500;
+  margin-bottom:3px;
+}
+.add-pot-modal__shapes{
+  display:flex;
+  gap:5px;
+}
+.add-pot-modal__shape{
+  flex:1;
+  padding:7px 3px;
+  border:1px solid var(--border);
+  border-radius:6px;
+  background:var(--bg);
+  cursor:pointer;
+  text-align:center;
+  font-size:0.65rem;
+  color:var(--text-muted);
+  transition:all .12s;
+}
+.add-pot-modal__shape.is-active{
+  border-color:var(--accent);
+  background:var(--accent-light);
+  color:var(--accent);
+}
+.add-pot-modal__shape-icon{
+  display:block;
+  font-size:1rem;
+  margin-bottom:1px;
+}
+.add-pot-modal__row{
+  display:flex;
+  gap:7px;
+}
+.add-pot-modal__swatches{
+  display:flex;
+  gap:5px;
+  flex-wrap:wrap;
+}
+.add-pot-modal__swatch{
+  width:26px;
+  height:26px;
+  border-radius:50%;
+  background:var(--swatch-color);
+  cursor:pointer;
+  border:2px solid transparent;
+  transition:all .12s;
+}
+.add-pot-modal__swatch.is-selected{
+  border-color:var(--text);
+  transform:scale(1.1);
+}
+.add-pot-modal__swatch-empty{
+  width:26px;
+  height:26px;
+  border-radius:50%;
+  border:2px dashed var(--border);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  cursor:pointer;
+  font-size:16px;
+  color:var(--text-muted);
+}
+.add-pot-modal__color-input{
+  position:absolute;
+  width:0;
+  height:0;
+  opacity:0;
+  pointer-events:none;
+}
+.add-pot-modal__actions{
+  display:flex;
+  gap:8px;
+  margin-top:18px;
+  justify-content:flex-end;
+}

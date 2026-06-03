@@ -1,0 +1,72 @@
+.plants-tab{
+  display:flex;
+  flex-direction:column;
+  flex:1;
+  overflow:hidden;
+}
+.plants-tab__header{
+  padding:12px 14px;
+  border-bottom:1px solid var(--border);
+  flex-shrink:0;
+}
+.plants-tab__title{
+  font-size:0.65rem;
+  font-weight:500;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--text-muted);
+  margin-bottom:8px;
+}
+.plants-tab__add{
+  width:100%;
+}
+.plants-tab__list{
+  flex:1;
+  overflow-y:auto;
+  padding:6px;
+}
+.plants-tab__item{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:7px 9px;
+  border-radius:8px;
+  cursor:pointer;
+  margin-bottom:3px;
+  transition:all .12s;
+  border:1px solid transparent;
+  background:transparent;
+}
+.plants-tab__item.is-selected{
+  border-color:var(--accent);
+  background:var(--accent-light);
+}
+.plants-tab__emoji{
+  font-size:1.3rem;
+  width:28px;
+  text-align:center;
+  flex-shrink:0;
+}
+.plants-tab__body{
+  flex:1;
+  min-width:0;
+}
+.plants-tab__name{
+  font-size:0.8rem;
+  font-weight:500;
+}
+.plants-tab__meta{
+  font-size:0.7rem;
+  color:var(--text-muted);
+}
+.plants-tab__assign{
+  padding:3px 6px;
+  font-size:0.7rem;
+}
+.plants-tab__empty{
+  text-align:center;
+  padding:20px 14px;
+  color:var(--text-muted);
+  font-size:0.8rem;
+  line-height:1.6;
+}

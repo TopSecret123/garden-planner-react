@@ -1,0 +1,42 @@
+.font-picker{
+  padding:14px 14px 12px;
+  border-bottom:1px solid var(--border);
+}
+.font-picker__title{
+  font-size:0.62rem;
+  font-weight:600;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  color:var(--text-muted);
+  margin-bottom:10px;
+}
+.font-picker__list{
+  display:flex;
+  flex-direction:column;
+  gap:5px;
+}
+.font-picker__option{
+  padding:7px 10px;
+  border-radius:7px;
+  border:1px solid var(--border);
+  background:var(--bg);
+  cursor:pointer;
+  text-align:left;
+  font-size:0.8rem;
+  color:var(--text);
+  font-family:var(--font-preview);
+  font-weight:400;
+  transition:all .15s;
+}
+.font-picker__option.is-active{
+  border-color:var(--accent);
+  background:var(--accent-light);
+  color:var(--accent);
+  font-weight:500;
+}
+.font-picker__preview{
+  font-size:0.68rem;
+  color:var(--text-muted);
+  margin-top:1px;
+  font-family:var(--font-preview);
+}

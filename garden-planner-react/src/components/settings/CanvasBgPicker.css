@@ -1,0 +1,49 @@
+.canvas-bg-picker{
+  padding:14px 14px 12px;
+  border-bottom:1px solid var(--border);
+}
+.canvas-bg-picker__title{
+  font-size:0.62rem;
+  font-weight:600;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  color:var(--text-muted);
+  margin-bottom:10px;
+}
+.canvas-bg-picker__swatches{
+  display:flex;
+  gap:5px;
+  flex-wrap:wrap;
+  margin-bottom:8px;
+}
+.canvas-bg-picker__swatch{
+  width:28px;
+  height:28px;
+  border-radius:6px;
+  background:var(--bg-color);
+  cursor:pointer;
+  flex-shrink:0;
+  border:2px solid transparent;
+  transition:all .12s;
+}
+.canvas-bg-picker__swatch.is-active{
+  border-color:var(--accent);
+}
+.canvas-bg-picker__custom{
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+.canvas-bg-picker__color-input{
+  width:32px;
+  height:28px;
+  border:1px solid var(--border);
+  border-radius:5px;
+  cursor:pointer;
+  padding:1px 2px;
+  background:var(--panel);
+}
+.canvas-bg-picker__custom-label{
+  font-size:0.72rem;
+  color:var(--text-muted);
+}

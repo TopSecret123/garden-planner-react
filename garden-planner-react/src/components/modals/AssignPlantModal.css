@@ -1,0 +1,43 @@
+.assign-plant-modal__overlay{
+  position:fixed;
+  inset:0;
+  background:rgba(0,0,0,.45);
+  z-index:100;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:16px;
+  backdrop-filter:blur(2px);
+}
+.assign-plant-modal{
+  background:var(--panel);
+  border-radius:14px;
+  padding:24px;
+  width:100%;
+  max-width:460px;
+  box-shadow:0 20px 60px rgba(0,0,0,.25);
+  border:1px solid var(--border);
+}
+.assign-plant-modal__title{
+  font-family:var(--font-display);
+  font-size:1.25rem;
+  margin-bottom:6px;
+}
+.assign-plant-modal__desc{
+  font-size:0.82rem;
+  color:var(--text-muted);
+  margin-bottom:16px;
+}
+.assign-plant-modal__label{
+  display:block;
+  font-size:0.7rem;
+  color:var(--text-muted);
+  font-weight:500;
+  margin-bottom:3px;
+}
+.assign-plant-modal__actions{
+  display:flex;
+  gap:8px;
+  margin-top:18px;
+  justify-content:flex-end;
+}

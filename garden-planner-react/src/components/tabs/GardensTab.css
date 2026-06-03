@@ -1,0 +1,76 @@
+.gardens-tab{
+  display:flex;
+  flex-direction:column;
+  flex:1;
+  overflow:hidden;
+}
+.gardens-tab__header{
+  padding:12px 14px;
+  border-bottom:1px solid var(--border);
+  flex-shrink:0;
+}
+.gardens-tab__title{
+  font-size:0.65rem;
+  font-weight:500;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--text-muted);
+  margin-bottom:8px;
+}
+.gardens-tab__add{
+  width:100%;
+}
+.gardens-tab__list{
+  flex:1;
+  overflow-y:auto;
+  padding:6px;
+}
+.gardens-tab__item{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:9px 10px;
+  border-radius:8px;
+  cursor:pointer;
+  margin-bottom:5px;
+  transition:all .12s;
+  border:1px solid var(--border);
+  background:white;
+}
+.gardens-tab__item.is-active{
+  border-color:var(--accent);
+  background:var(--accent-light);
+}
+.gardens-tab__item.is-archived{
+  opacity:0.65;
+}
+.gardens-tab__emoji{
+  font-size:1.5rem;
+  flex-shrink:0;
+}
+.gardens-tab__body{
+  flex:1;
+  min-width:0;
+}
+.gardens-tab__name{
+  font-size:0.82rem;
+  font-weight:600;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.gardens-tab__meta{
+  font-size:0.7rem;
+  color:var(--text-muted);
+}
+.gardens-tab__actions{
+  display:flex;
+  gap:3px;
+}
+.gardens-tab__icon-btn{
+  padding:3px 6px;
+  font-size:0.7rem;
+}
+.gardens-tab__icon-btn.is-danger{
+  color:var(--danger);
+}

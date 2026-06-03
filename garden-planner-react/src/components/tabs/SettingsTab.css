@@ -1,0 +1,21 @@
+.settings-tab{
+  display:flex;
+  flex-direction:column;
+  overflow-y:auto;
+  flex:1;
+}
+.settings-tab__section{
+  padding:12px 14px;
+  border-bottom:1px solid var(--border);
+}
+.settings-tab__title{
+  font-size:0.65rem;
+  font-weight:500;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:var(--text-muted);
+  margin-bottom:8px;
+}
+.settings-tab__btn{
+  width:100%;
+}
