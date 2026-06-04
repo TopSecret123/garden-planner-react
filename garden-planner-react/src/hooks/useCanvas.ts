@@ -1,431 +1,1003 @@
+/**
+ * useCanvas.ts — Garden Canvas Hook
+ *
+ * This file does two big things:
+ *   1. HANDLES INPUT — mouse, touch, and keyboard events on the canvas
+ *   2. DRAWS — renders beds, pots, grid, and overlays onto the canvas
+ *
+ * It's a custom React hook, meaning it packages up logic you can plug
+ * into any component with: const handle = useCanvas(canvasRef, onBedAdded)
+ */
+
 import { useRef, useEffect, useCallback } from 'react';
 import { useGardenStore } from '../store/gardenStore';
 import { isInPoly, isRectBed, edgeLenCm, fmtDim, shoelaceArea } from '../../src/lib/geometry';
 import { SOIL_COLORS, COLORS, GRID_SNAP_CM } from '../../src/lib/constants';
 import type { Bed, Pot } from '../types';
 
-type DrawMode = 'none' | 'draw_rect' | 'draw_rect_drag' | 'draw_poly' | 'drag_pot' | 'drag_bed_point';
+// ─────────────────────────────────────────────────────────────────
+// TYPES
+// ─────────────────────────────────────────────────────────────────
 
+/**
+ * All the possible "modes" the canvas can be in.
+ * Only one mode is active at a time.
+ *
+ *   none          → idle, just panning
+ *   draw_rect     → user clicked "Draw Rectangle" button, waiting for first click
+ *   draw_rect_drag→ user is dragging to size the rectangle
+ *   draw_poly     → user is clicking to place polygon points
+ *   drag_pot      → user is dragging a pot around
+ *   drag_bed_point→ user is dragging one corner of a bed
+ */
+type DrawMode =
+  | 'none'
+  | 'draw_rect'
+  | 'draw_rect_drag'
+  | 'draw_poly'
+  | 'drag_pot'
+  | 'drag_bed_point';
+
+/**
+ * These are the functions this hook exposes to the outside world.
+ * The parent component calls these to trigger actions.
+ */
 export interface CanvasHandle {
-  startDrawRect: () => void;
-  startDrawPoly: () => void;
-  cancelDraw:    () => void;
+  startDrawRect: () => void; // activate rectangle draw mode
+  startDrawPoly: () => void; // activate polygon draw mode
+  cancelDraw:    () => void; // exit any draw mode (also triggered by Escape key)
   zoomIn:        () => void;
   zoomOut:       () => void;
-  fitToScreen:   () => void;
+  fitToScreen:   () => void; // zoom/pan so all items are visible
   toggleGrid:    () => void;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// THE HOOK
+// ─────────────────────────────────────────────────────────────────
+
 export function useCanvas(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
-  onBedAdded?: () => void,
+  onBedAdded?: () => void, // optional callback when a new bed is finished drawing
 ): CanvasHandle {
+
+  // ── Store access ──────────────────────────────────────────────
+  // We use a ref to the store so event listeners always see fresh data
+  // (if we used the hook directly inside event handlers, they'd be stale)
   const storeRef = useRef(useGardenStore.getState());
-  useEffect(() => useGardenStore.subscribe(s => { storeRef.current = s; }), []);
+  useEffect(() => useGardenStore.subscribe(freshState => {
+    storeRef.current = freshState;
+  }), []);
 
-  const modeRef             = useRef<DrawMode>('none');
-  const drawStartRef        = useRef<{x:number;y:number}|null>(null);
-  const drawRectScreenStart = useRef<{x:number;y:number}|null>(null);
-  const drawPolyRef         = useRef<{x:number;y:number}[]>([]);
-  const dragOffsetRef       = useRef({x:0,y:0});
-  const isPanningRef        = useRef(false);
-  const panStartRef         = useRef<{x:number;y:number}|null>(null);
-  const pinchDistRef        = useRef<number|null>(null);
-  const rectOverlayRef      = useRef<HTMLDivElement|null>(null);
-  const dragBedIdRef        = useRef<number|null>(null);
-  const dragBedPointIdxRef  = useRef(-1);
-  const dragBedAnchorRef    = useRef<{x:number;y:number}|null>(null);
+  // ── Mode & draw state (all refs so they don't trigger re-renders) ──
+  const currentMode = useRef<DrawMode>('none');
 
-  // ── helpers ──────────────────────────────────────────
-  function getCP(e: {clientX:number;clientY:number}): {x:number;y:number} {
-    const r = canvasRef.current!.getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  // Rectangle drawing
+  const rectWorldStart  = useRef<{x:number; y:number} | null>(null); // world coords of first click
+  const rectScreenStart = useRef<{x:number; y:number} | null>(null); // screen coords (for overlay div)
+
+  // Polygon drawing — accumulates clicked points
+  const polyPoints = useRef<{x:number; y:number}[]>([]);
+
+  // Dragging a pot — offset from pot center to where the user clicked
+  const dragOffset = useRef({ x: 0, y: 0 });
+
+  // Panning the canvas
+  const isPanning   = useRef(false);
+  const panStart    = useRef<{x:number; y:number} | null>(null);
+
+  // Pinch-to-zoom on touch devices
+  const lastPinchDistance = useRef<number | null>(null);
+
+  // The dashed rectangle shown while dragging to draw a rect bed
+  const rectOverlayDiv = useRef<HTMLDivElement | null>(null);
+
+  // Dragging a bed's corner point
+  const draggingBedId       = useRef<number | null>(null);
+  const draggingPointIndex  = useRef(-1);
+  const dragPointOriginal   = useRef<{x:number; y:number} | null>(null); // position before drag started
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // SECTION 1: HELPER UTILITIES
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Convert a mouse/touch event position to canvas-relative pixel coords.
+   * (because clientX/Y is relative to the browser window)
+   */
+  function getCanvasPoint(event: {clientX:number; clientY:number}): {x:number; y:number} {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    return {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    };
   }
-  function toWorld(cp: {x:number;y:number}) {
+
+  /**
+   * Convert canvas pixel coords → "world" coords.
+   *
+   * The canvas has a pan offset (viewX, viewY) and zoom level (viewScale).
+   * World coords are what get stored in beds/pots — they don't change when you pan/zoom.
+   */
+  function canvasToWorld(canvasPoint: {x:number; y:number}) {
     const { viewX, viewY, viewScale } = storeRef.current;
-    return { x: (cp.x - viewX) / viewScale, y: (cp.y - viewY) / viewScale };
+    return {
+      x: (canvasPoint.x - viewX) / viewScale,
+      y: (canvasPoint.y - viewY) / viewScale,
+    };
   }
-  function snapToGrid(val: number) {
+
+  /**
+   * Snap a world-coordinate value to the nearest grid line.
+   * Only applies when the user has grid-snap enabled AND scale is set.
+   */
+  function snapToGrid(value: number): number {
     const { moveMode, state } = storeRef.current;
-    if (moveMode !== 'grid' || !state.pxPerCm) return val;
-    const snapPx = GRID_SNAP_CM * state.pxPerCm;
-    return Math.round(val / snapPx) * snapPx;
+    if (moveMode !== 'grid' || !state.pxPerCm) return value; // snap is off
+    const snapSizePx = GRID_SNAP_CM * state.pxPerCm;
+    return Math.round(value / snapSizePx) * snapSizePx;
   }
-  function getPotAt(wx: number, wy: number): Pot | null {
+
+  /**
+   * Find which pot (if any) is under the given world coordinate.
+   * Iterates backwards so items drawn on top get priority.
+   * Returns the pot, or null if the click missed everything.
+   */
+  function getPotAtPosition(worldX: number, worldY: number): Pot | null {
     const { state, viewScale } = storeRef.current;
     const scale = state.pxPerCm ?? 2;
+
+    // Iterate in reverse so topmost-rendered pot is hit first
     for (let i = state.pots.length - 1; i >= 0; i--) {
       const pot = state.pots[i];
-      const dx = wx - pot.position.x, dy = wy - pot.position.y;
-      const pw = pot.width_cm * scale, ph = pot.height_cm * scale;
-      if (pot.shape === 'round') { if (Math.sqrt(dx*dx+dy*dy) <= pw/2+5/viewScale) return pot; }
-      else { if (Math.abs(dx) <= pw/2+5/viewScale && Math.abs(dy) <= ph/2+5/viewScale) return pot; }
-    }
-    return null;
-  }
-  function getBedPointAt(wx: number, wy: number): {bed:Bed;idx:number}|null {
-    const { state, viewScale } = storeRef.current;
-    const HIT = 10/viewScale;
-    for (const bed of state.beds)
-      for (let i = 0; i < bed.points.length; i++) {
-        const pt = bed.points[i], dx = wx-pt.x, dy = wy-pt.y;
-        if (Math.sqrt(dx*dx+dy*dy) <= HIT) return { bed, idx: i };
+      const dx = worldX - pot.position.x;
+      const dy = worldY - pot.position.y;
+      const potW = pot.width_cm * scale;
+      const potH = pot.height_cm * scale;
+      const hitSlop = 5 / viewScale; // small tolerance so clicking near the edge works
+
+      if (pot.shape === 'round') {
+        // Circle hit test: distance from center ≤ radius
+        if (Math.sqrt(dx*dx + dy*dy) <= potW/2 + hitSlop) return pot;
+      } else {
+        // Rectangle hit test: within bounding box
+        if (Math.abs(dx) <= potW/2 + hitSlop && Math.abs(dy) <= potH/2 + hitSlop) return pot;
       }
+    }
     return null;
   }
-  function alignSnap(x: number, y: number, potId: number) {
-    const { state, alignMode, viewScale } = storeRef.current;
-    if (!alignMode || state.pots.length < 2) return {x,y};
-    const T = 8/viewScale;
-    let nx = x, ny = y;
-    for (const o of state.pots) {
-      if (o.id === potId) continue;
-      if (Math.abs(nx - o.position.x) < T) nx = o.position.x;
-      if (Math.abs(ny - o.position.y) < T) ny = o.position.y;
+
+  /**
+   * Find which bed corner point (if any) is near the given world coordinate.
+   * Returns both the bed and the index of the matching corner, or null.
+   */
+  function getBedCornerAtPosition(worldX: number, worldY: number): {bed: Bed; idx: number} | null {
+    const { state, viewScale } = storeRef.current;
+    const hitRadius = 10 / viewScale;
+
+    for (const bed of state.beds) {
+      for (let i = 0; i < bed.points.length; i++) {
+        const point = bed.points[i];
+        const dx = worldX - point.x;
+        const dy = worldY - point.y;
+        if (Math.sqrt(dx*dx + dy*dy) <= hitRadius) {
+          return { bed, idx: i };
+        }
+      }
     }
-    return {x:nx,y:ny};
+    return null;
   }
-  function startRectOverlay(cp: {x:number;y:number}) {
-    removeRectOverlay();
-    const area = canvasRef.current?.parentElement;
-    if (!area) return;
-    const d = document.createElement('div');
-    d.style.cssText = 'position:absolute;border:2px dashed #4a7c59;background:rgba(74,124,89,0.1);pointer-events:none;border-radius:3px;z-index:5;';
-    Object.assign(d.style, {left:cp.x+'px',top:cp.y+'px',width:'0',height:'0'});
-    area.appendChild(d); rectOverlayRef.current = d;
+
+  /**
+   * When dragging a pot, snap it to align with other pots' X or Y positions.
+   * This lets you easily line things up without the grid.
+   * Only applies when "align mode" is on.
+   */
+  function applyAlignSnap(x: number, y: number, draggingPotId: number) {
+    const { state, alignMode, viewScale } = storeRef.current;
+    if (!alignMode || state.pots.length < 2) return { x, y };
+
+    const snapThreshold = 8 / viewScale;
+    let snappedX = x, snappedY = y;
+
+    for (const otherPot of state.pots) {
+      if (otherPot.id === draggingPotId) continue;
+      if (Math.abs(snappedX - otherPot.position.x) < snapThreshold) snappedX = otherPot.position.x;
+      if (Math.abs(snappedY - otherPot.position.y) < snapThreshold) snappedY = otherPot.position.y;
+    }
+    return { x: snappedX, y: snappedY };
   }
-  function updateRectOverlay(s: {x:number;y:number}, c: {x:number;y:number}) {
-    const d = rectOverlayRef.current; if (!d) return;
-    Object.assign(d.style, {left:Math.min(s.x,c.x)+'px',top:Math.min(s.y,c.y)+'px',width:Math.abs(c.x-s.x)+'px',height:Math.abs(c.y-s.y)+'px'});
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // SECTION 2: RECT OVERLAY DIV
+  // (the dashed rectangle shown while dragging to create a bed)
+  // ═══════════════════════════════════════════════════════════════
+
+  function createRectOverlay(startPoint: {x:number; y:number}) {
+    removeRectOverlay(); // clean up any old one first
+    const parentArea = canvasRef.current?.parentElement;
+    if (!parentArea) return;
+
+    const div = document.createElement('div');
+    div.style.cssText = [
+      'position:absolute',
+      'border:2px dashed #4a7c59',
+      'background:rgba(74,124,89,0.1)',
+      'pointer-events:none', // don't intercept mouse events
+      'border-radius:3px',
+      'z-index:5',
+    ].join(';');
+    Object.assign(div.style, {
+      left:   startPoint.x + 'px',
+      top:    startPoint.y + 'px',
+      width:  '0',
+      height: '0',
+    });
+
+    parentArea.appendChild(div);
+    rectOverlayDiv.current = div;
   }
-  function removeRectOverlay() { rectOverlayRef.current?.remove(); rectOverlayRef.current = null; }
-  function startPan(cx: number, cy: number) {
-    isPanningRef.current = true;
+
+  function updateRectOverlay(start: {x:number; y:number}, current: {x:number; y:number}) {
+    const div = rectOverlayDiv.current;
+    if (!div) return;
+    // Use min/max so dragging left/up still works correctly
+    Object.assign(div.style, {
+      left:   Math.min(start.x, current.x) + 'px',
+      top:    Math.min(start.y, current.y) + 'px',
+      width:  Math.abs(current.x - start.x) + 'px',
+      height: Math.abs(current.y - start.y) + 'px',
+    });
+  }
+
+  function removeRectOverlay() {
+    rectOverlayDiv.current?.remove();
+    rectOverlayDiv.current = null;
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════
+  // SECTION 3: PANNING
+  // ═══════════════════════════════════════════════════════════════
+
+  function startPanning(clientX: number, clientY: number) {
+    isPanning.current = true;
     const { viewX, viewY } = storeRef.current;
-    panStartRef.current = {x: cx-viewX, y: cy-viewY};
+    // Save how far the cursor is from the current view origin
+    // so we can maintain that offset as the user drags
+    panStart.current = { x: clientX - viewX, y: clientY - viewY };
     if (canvasRef.current) canvasRef.current.style.cursor = 'grabbing';
   }
 
-  // ── render ────────────────────────────────────────────
+
+  // ═══════════════════════════════════════════════════════════════
+  // SECTION 4: RENDER FUNCTION
+  // Redraws the entire canvas from scratch each frame.
+  // Called whenever the store changes.
+  // ═══════════════════════════════════════════════════════════════
+
+  // We store the render function in a ref so event listeners can always
+  // call the latest version without needing to re-register themselves.
   const renderRef = useRef<() => void>(() => {});
 
   const render = useCallback(() => {
     const canvas = canvasRef.current!;
-    const ctx = canvas.getContext('2d'); if (!ctx) return;
-    const s = storeRef.current;
-    const { state, viewX, viewY, viewScale, showGrid, selectedBedId, selectedPotId, alignMode, appSettings, isActiveGardenArchived } = s;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
+    const store = storeRef.current;
+    const {
+      state, viewX, viewY, viewScale,
+      showGrid, selectedBedId, selectedPotId,
+      alignMode, appSettings, isActiveGardenArchived,
+    } = store;
+
+    // Clear previous frame
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Apply pan + zoom transform so everything draws in world space
     ctx.save();
     ctx.translate(viewX, viewY);
     ctx.scale(viewScale, viewScale);
 
+    // Draw layers from bottom to top
     if (showGrid) drawGrid(ctx, canvas, state, viewX, viewY, viewScale);
     drawAllBeds(ctx, state, selectedBedId, viewScale);
     drawPotsAll(ctx, state, selectedPotId, viewScale, appSettings);
-    if (modeRef.current === 'draw_poly' && drawPolyRef.current.length > 0) {
-      const poly = drawPolyRef.current;
-      ctx.beginPath(); ctx.moveTo(poly[0].x, poly[0].y);
-      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
-      ctx.strokeStyle = '#4a7c59'; ctx.lineWidth = 2/viewScale;
-      ctx.setLineDash([6/viewScale,3/viewScale]); ctx.stroke(); ctx.setLineDash([]);
-      poly.forEach(pt => { ctx.beginPath(); ctx.arc(pt.x,pt.y,4/viewScale,0,Math.PI*2); ctx.fillStyle='#4a7c59'; ctx.fill(); });
+
+    // Draw the in-progress polygon while the user is placing points
+    if (currentMode.current === 'draw_poly' && polyPoints.current.length > 0) {
+      const points = polyPoints.current;
+      ctx.beginPath();
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+      ctx.strokeStyle = '#4a7c59';
+      ctx.lineWidth = 2 / viewScale;
+      ctx.setLineDash([6/viewScale, 3/viewScale]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Draw dots at each placed point
+      points.forEach(pt => {
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 4/viewScale, 0, Math.PI * 2);
+        ctx.fillStyle = '#4a7c59';
+        ctx.fill();
+      });
     }
-    if (alignMode && modeRef.current === 'drag_pot' && selectedPotId)
+
+    // Draw alignment guide lines while dragging a pot
+    if (alignMode && currentMode.current === 'drag_pot' && selectedPotId) {
       drawAlignmentGuides(ctx, state, selectedPotId, viewX, viewY, canvas, viewScale);
+    }
+
     ctx.restore();
+
+    // Archived banner is drawn in screen space (no transform), always on top
     if (isActiveGardenArchived()) drawArchivedBanner(ctx, canvas);
   }, []);
 
+  // Keep renderRef pointing at the latest render function
   useEffect(() => { renderRef.current = render; });
 
-  // re-render on store changes
+  // Re-render whenever the store changes (beds moved, pots added, etc.)
   useEffect(() => {
     return useGardenStore.subscribe(() => { renderRef.current(); });
   }, []);
 
-  // resize
+  // Re-render when the browser window is resized
   useEffect(() => {
-    function resize() {
+    function handleResize() {
       const canvas = canvasRef.current!;
-      const area = canvas.parentElement; if (!area) return;
-      canvas.width = area.clientWidth; canvas.height = area.clientHeight;
+      const parent = canvas.parentElement;
+      if (!parent) return;
+      canvas.width  = parent.clientWidth;
+      canvas.height = parent.clientHeight;
       renderRef.current();
     }
-    resize();
-    window.addEventListener('resize', resize);
-    return () => window.removeEventListener('resize', resize);
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // mouse
+
+  // ═══════════════════════════════════════════════════════════════
+  // SECTION 5: MOUSE EVENT HANDLERS
+  // ═══════════════════════════════════════════════════════════════
+
   useEffect(() => {
     const canvas = canvasRef.current!;
+
     function onMouseDown(e: MouseEvent) {
-      if (e.button === 1 || e.button === 2) { startPan(e.clientX, e.clientY); return; }
-      const cp = getCP(e), wp = toWorld(cp), s = storeRef.current;
-      if (s.isActiveGardenArchived()) { startPan(e.clientX, e.clientY); return; }
-      if (modeRef.current === 'draw_rect') {
-        modeRef.current = 'draw_rect_drag'; drawStartRef.current = wp;
-        drawRectScreenStart.current = cp; startRectOverlay(cp); return;
-      }
-      if (modeRef.current === 'draw_poly') { drawPolyRef.current.push(wp); renderRef.current(); return; }
-      const bpHit = getBedPointAt(wp.x, wp.y);
-      if (bpHit) {
-        modeRef.current = 'drag_bed_point'; dragBedIdRef.current = bpHit.bed.id;
-        dragBedPointIdxRef.current = bpHit.idx; dragBedAnchorRef.current = {...bpHit.bed.points[bpHit.idx]};
-        s.selectBed(bpHit.bed.id); canvas.style.cursor = 'move'; renderRef.current(); return;
-      }
-      const pot = getPotAt(wp.x, wp.y);
-      if (pot) {
-        modeRef.current = 'drag_pot'; s.selectPot(pot.id);
-        dragOffsetRef.current = {x: wp.x-pot.position.x, y: wp.y-pot.position.y};
-        canvas.style.cursor = 'grabbing'; renderRef.current(); return;
-      }
-      for (const bed of s.state.beds) {
-        if (bed.points.length >= 3 && isInPoly(wp.x, wp.y, bed.points)) {
-          s.selectBed(bed.id); renderRef.current(); startPan(e.clientX, e.clientY); return;
-        }
-      }
-      s.selectPot(null); s.selectBed(null); renderRef.current(); startPan(e.clientX, e.clientY);
-    }
-    function onMouseMove(e: MouseEvent) {
-      const cp = getCP(e), wp = toWorld(cp), s = storeRef.current;
-      if (isPanningRef.current && panStartRef.current) {
-        s.setView(e.clientX - panStartRef.current.x, e.clientY - panStartRef.current.y, s.viewScale); return;
-      }
-      if (modeRef.current === 'draw_rect_drag' && drawRectScreenStart.current) {
-        updateRectOverlay(drawRectScreenStart.current, cp); return;
-      }
-      if (modeRef.current === 'drag_bed_point' && dragBedIdRef.current !== null) {
-        let wx = snapToGrid(wp.x), wy = snapToGrid(wp.y);
-        if (e.shiftKey && dragBedAnchorRef.current) {
-          const dx = Math.abs(wx - dragBedAnchorRef.current.x), dy = Math.abs(wy - dragBedAnchorRef.current.y);
-          if (dx > dy) wy = dragBedAnchorRef.current.y; else wx = dragBedAnchorRef.current.x;
-        }
-        const bed = s.state.beds.find(b => b.id === dragBedIdRef.current);
-        if (bed) { const pts = [...bed.points]; pts[dragBedPointIdxRef.current] = {x:wx,y:wy}; s.updateBed(bed.id,'points',pts); }
+      // Middle-click or right-click → always pan (never draw)
+      if (e.button === 1 || e.button === 2) {
+        startPanning(e.clientX, e.clientY);
         return;
       }
-      if (modeRef.current === 'drag_pot' && s.selectedPotId) {
-        let nx = snapToGrid(wp.x - dragOffsetRef.current.x), ny = snapToGrid(wp.y - dragOffsetRef.current.y);
-        if (s.alignMode) ({x:nx,y:ny} = alignSnap(nx, ny, s.selectedPotId));
-        s.movePot(s.selectedPotId, nx, ny); return;
+
+      const canvasPoint = getCanvasPoint(e);
+      const worldPoint  = canvasToWorld(canvasPoint);
+      const store       = storeRef.current;
+
+      // Don't allow edits on archived gardens
+      if (store.isActiveGardenArchived()) {
+        startPanning(e.clientX, e.clientY);
+        return;
       }
-      if (modeRef.current === 'draw_poly' && drawPolyRef.current.length > 0) {
+
+      // ── Drawing a rectangle bed ────────────────────────
+      if (currentMode.current === 'draw_rect') {
+        currentMode.current  = 'draw_rect_drag';
+        rectWorldStart.current  = worldPoint;
+        rectScreenStart.current = canvasPoint;
+        createRectOverlay(canvasPoint);
+        return;
+      }
+
+      // ── Placing a polygon point ────────────────────────
+      if (currentMode.current === 'draw_poly') {
+        polyPoints.current.push(worldPoint);
         renderRef.current();
-        const ctx = canvas.getContext('2d'); if (!ctx) return;
-        ctx.save(); ctx.translate(s.viewX, s.viewY); ctx.scale(s.viewScale, s.viewScale);
-        const last = drawPolyRef.current[drawPolyRef.current.length-1];
-        ctx.beginPath(); ctx.moveTo(last.x,last.y); ctx.lineTo(wp.x,wp.y);
-        ctx.strokeStyle='#4a7c59'; ctx.lineWidth=1.5/s.viewScale;
-        ctx.setLineDash([4/s.viewScale,3/s.viewScale]); ctx.stroke(); ctx.setLineDash([]); ctx.restore();
+        return;
+      }
+
+      // ── Dragging a bed corner ──────────────────────────
+      const cornerHit = getBedCornerAtPosition(worldPoint.x, worldPoint.y);
+      if (cornerHit) {
+        currentMode.current          = 'drag_bed_point';
+        draggingBedId.current        = cornerHit.bed.id;
+        draggingPointIndex.current   = cornerHit.idx;
+        dragPointOriginal.current    = { ...cornerHit.bed.points[cornerHit.idx] };
+        store.selectBed(cornerHit.bed.id);
+        canvas.style.cursor = 'move';
+        renderRef.current();
+        return;
+      }
+
+      // ── Dragging a pot ─────────────────────────────────
+      const pot = getPotAtPosition(worldPoint.x, worldPoint.y);
+      if (pot) {
+        currentMode.current = 'drag_pot';
+        store.selectPot(pot.id);
+        dragOffset.current = {
+          x: worldPoint.x - pot.position.x,
+          y: worldPoint.y - pot.position.y,
+        };
+        canvas.style.cursor = 'grabbing';
+        renderRef.current();
+        return;
+      }
+
+      // ── Clicking inside a bed (select it + pan) ────────
+      for (const bed of store.state.beds) {
+        if (bed.points.length >= 3 && isInPoly(worldPoint.x, worldPoint.y, bed.points)) {
+          store.selectBed(bed.id);
+          renderRef.current();
+          startPanning(e.clientX, e.clientY);
+          return;
+        }
+      }
+
+      // ── Clicked empty space → deselect everything + pan ─
+      store.selectPot(null);
+      store.selectBed(null);
+      renderRef.current();
+      startPanning(e.clientX, e.clientY);
+    }
+
+    function onMouseMove(e: MouseEvent) {
+      const canvasPoint = getCanvasPoint(e);
+      const worldPoint  = canvasToWorld(canvasPoint);
+      const store       = storeRef.current;
+
+      // ── Pan the view ───────────────────────────────────
+      if (isPanning.current && panStart.current) {
+        store.setView(
+          e.clientX - panStart.current.x,
+          e.clientY - panStart.current.y,
+          store.viewScale,
+        );
+        return;
+      }
+
+      // ── Update the dashed rect overlay while dragging ──
+      if (currentMode.current === 'draw_rect_drag' && rectScreenStart.current) {
+        updateRectOverlay(rectScreenStart.current, canvasPoint);
+        return;
+      }
+
+      // ── Move a bed corner ──────────────────────────────
+      if (currentMode.current === 'drag_bed_point' && draggingBedId.current !== null) {
+        let wx = snapToGrid(worldPoint.x);
+        let wy = snapToGrid(worldPoint.y);
+
+        // Hold Shift to lock to horizontal/vertical axis from where you started
+        if (e.shiftKey && dragPointOriginal.current) {
+          const dxFromOrigin = Math.abs(wx - dragPointOriginal.current.x);
+          const dyFromOrigin = Math.abs(wy - dragPointOriginal.current.y);
+          if (dxFromOrigin > dyFromOrigin) {
+            wy = dragPointOriginal.current.y; // lock to horizontal
+          } else {
+            wx = dragPointOriginal.current.x; // lock to vertical
+          }
+        }
+
+        const bed = store.state.beds.find(b => b.id === draggingBedId.current);
+        if (bed) {
+          const updatedPoints = [...bed.points];
+          updatedPoints[draggingPointIndex.current] = { x: wx, y: wy };
+          store.updateBed(bed.id, 'points', updatedPoints);
+        }
+        return;
+      }
+
+      // ── Move a pot ─────────────────────────────────────
+      if (currentMode.current === 'drag_pot' && store.selectedPotId) {
+        let newX = snapToGrid(worldPoint.x - dragOffset.current.x);
+        let newY = snapToGrid(worldPoint.y - dragOffset.current.y);
+        if (store.alignMode) {
+          ({ x: newX, y: newY } = applyAlignSnap(newX, newY, store.selectedPotId));
+        }
+        store.movePot(store.selectedPotId, newX, newY);
+        return;
+      }
+
+      // ── Draw preview line from last polygon point to cursor ─
+      if (currentMode.current === 'draw_poly' && polyPoints.current.length > 0) {
+        renderRef.current(); // redraw clean first
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.save();
+        ctx.translate(store.viewX, store.viewY);
+        ctx.scale(store.viewScale, store.viewScale);
+        const lastPoint = polyPoints.current[polyPoints.current.length - 1];
+        ctx.beginPath();
+        ctx.moveTo(lastPoint.x, lastPoint.y);
+        ctx.lineTo(worldPoint.x, worldPoint.y);
+        ctx.strokeStyle = '#4a7c59';
+        ctx.lineWidth = 1.5 / store.viewScale;
+        ctx.setLineDash([4/store.viewScale, 3/store.viewScale]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
       }
     }
+
     function onMouseUp(e: MouseEvent) {
-      const s = storeRef.current;
-      if (isPanningRef.current) {
-        isPanningRef.current = false; panStartRef.current = null;
-        canvas.style.cursor = (modeRef.current==='draw_rect'||modeRef.current==='draw_poly') ? 'crosshair' : 'default'; return;
+      const store = storeRef.current;
+
+      // ── End panning ────────────────────────────────────
+      if (isPanning.current) {
+        isPanning.current  = false;
+        panStart.current   = null;
+        const isDrawMode = currentMode.current === 'draw_rect' || currentMode.current === 'draw_poly';
+        canvas.style.cursor = isDrawMode ? 'crosshair' : 'default';
+        return;
       }
-      if (modeRef.current === 'drag_bed_point') {
-        s.pushHistory(); modeRef.current = 'none'; dragBedIdRef.current = null;
-        dragBedPointIdxRef.current = -1; dragBedAnchorRef.current = null;
-        canvas.style.cursor = 'default'; s.saveToStorage(); return;
+
+      // ── Finish dragging a bed corner ───────────────────
+      if (currentMode.current === 'drag_bed_point') {
+        store.pushHistory();       // save to undo stack
+        currentMode.current         = 'none';
+        draggingBedId.current       = null;
+        draggingPointIndex.current  = -1;
+        dragPointOriginal.current   = null;
+        canvas.style.cursor = 'default';
+        store.saveToStorage();
+        return;
       }
-      if (modeRef.current === 'draw_rect_drag' && drawStartRef.current) {
-        const cp = getCP(e), wp = toWorld(cp);
-        const x1=Math.min(drawStartRef.current.x,wp.x), y1=Math.min(drawStartRef.current.y,wp.y);
-        const x2=Math.max(drawStartRef.current.x,wp.x), y2=Math.max(drawStartRef.current.y,wp.y);
-        if (x2-x1>5 && y2-y1>5) { s.addBed([{x:x1,y:y1},{x:x2,y:y1},{x:x2,y:y2},{x:x1,y:y2}]); onBedAdded?.(); }
-        removeRectOverlay(); drawStartRef.current = null; drawRectScreenStart.current = null;
-        modeRef.current = 'none'; canvas.style.cursor = 'default'; return;
+
+      // ── Finish drawing a rectangle bed ─────────────────
+      if (currentMode.current === 'draw_rect_drag' && rectWorldStart.current) {
+        const canvasPoint = getCanvasPoint(e);
+        const worldPoint  = canvasToWorld(canvasPoint);
+
+        const x1 = Math.min(rectWorldStart.current.x, worldPoint.x);
+        const y1 = Math.min(rectWorldStart.current.y, worldPoint.y);
+        const x2 = Math.max(rectWorldStart.current.x, worldPoint.x);
+        const y2 = Math.max(rectWorldStart.current.y, worldPoint.y);
+
+        // Only create if the rect has meaningful size (not an accidental click)
+        if (x2 - x1 > 5 && y2 - y1 > 5) {
+          store.addBed([
+            { x: x1, y: y1 },
+            { x: x2, y: y1 },
+            { x: x2, y: y2 },
+            { x: x1, y: y2 },
+          ]);
+          onBedAdded?.();
+        }
+
+        removeRectOverlay();
+        rectWorldStart.current  = null;
+        rectScreenStart.current = null;
+        currentMode.current     = 'none';
+        canvas.style.cursor     = 'default';
+        return;
       }
-      if (modeRef.current === 'drag_pot') {
-        s.pushHistory(); modeRef.current = 'none'; canvas.style.cursor = 'default'; s.saveToStorage();
+
+      // ── Finish dragging a pot ──────────────────────────
+      if (currentMode.current === 'drag_pot') {
+        store.pushHistory();    // save to undo stack
+        currentMode.current = 'none';
+        canvas.style.cursor = 'default';
+        store.saveToStorage();
       }
     }
-    function onDblClick() {
-      if (modeRef.current === 'draw_poly' && drawPolyRef.current.length >= 3) {
-        storeRef.current.addBed([...drawPolyRef.current]);
-        drawPolyRef.current = []; modeRef.current = 'none';
-        canvas.style.cursor = 'default'; onBedAdded?.();
+
+    /**
+     * Double-click closes a polygon and creates the bed.
+     * Need at least 3 points to form a valid shape.
+     */
+    function onDoubleClick() {
+      if (currentMode.current === 'draw_poly' && polyPoints.current.length >= 3) {
+        storeRef.current.addBed([...polyPoints.current]);
+        polyPoints.current  = [];
+        currentMode.current = 'none';
+        canvas.style.cursor = 'default';
+        onBedAdded?.();
       }
     }
+
+    /**
+     * Zoom in/out by scrolling.
+     * Zooms toward/away from the cursor position.
+     */
     function onWheel(e: WheelEvent) {
       e.preventDefault();
-      const s = storeRef.current, d = e.deltaY > 0 ? 0.9 : 1.1;
-      const r = canvas.getBoundingClientRect(), cp = {x:e.clientX-r.left, y:e.clientY-r.top};
-      s.setView(cp.x-(cp.x-s.viewX)*d, cp.y-(cp.y-s.viewY)*d, s.viewScale*d);
+      const store = storeRef.current;
+      const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1; // scroll down = zoom out
+      const rect        = canvas.getBoundingClientRect();
+      const cursorOnCanvas = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      };
+      // Keep the point under the cursor stationary while zooming
+      store.setView(
+        cursorOnCanvas.x - (cursorOnCanvas.x - store.viewX) * zoomFactor,
+        cursorOnCanvas.y - (cursorOnCanvas.y - store.viewY) * zoomFactor,
+        store.viewScale * zoomFactor,
+      );
     }
-    canvas.addEventListener('mousedown', onMouseDown);
-    canvas.addEventListener('mousemove', onMouseMove);
-    canvas.addEventListener('mouseup', onMouseUp);
-    canvas.addEventListener('dblclick', onDblClick);
-    canvas.addEventListener('wheel', onWheel, {passive:false});
-    canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+    canvas.addEventListener('mousedown',   onMouseDown);
+    canvas.addEventListener('mousemove',   onMouseMove);
+    canvas.addEventListener('mouseup',     onMouseUp);
+    canvas.addEventListener('dblclick',    onDoubleClick);
+    canvas.addEventListener('wheel',       onWheel, { passive: false });
+    canvas.addEventListener('contextmenu', e => e.preventDefault()); // disable right-click menu
+
     return () => {
-      canvas.removeEventListener('mousedown', onMouseDown);
-      canvas.removeEventListener('mousemove', onMouseMove);
-      canvas.removeEventListener('mouseup', onMouseUp);
-      canvas.removeEventListener('dblclick', onDblClick);
-      canvas.removeEventListener('wheel', onWheel);
+      canvas.removeEventListener('mousedown',   onMouseDown);
+      canvas.removeEventListener('mousemove',   onMouseMove);
+      canvas.removeEventListener('mouseup',     onMouseUp);
+      canvas.removeEventListener('dblclick',    onDoubleClick);
+      canvas.removeEventListener('wheel',       onWheel);
     };
   }, []);
 
-  // touch
+
+  // ═══════════════════════════════════════════════════════════════
+  // SECTION 6: TOUCH EVENT HANDLERS
+  // (separate from mouse because touch has pinch-zoom and no button)
+  // ═══════════════════════════════════════════════════════════════
+
   useEffect(() => {
     const canvas = canvasRef.current!;
-    function pinchDist(e: TouchEvent) {
-      const dx=e.touches[0].clientX-e.touches[1].clientX, dy=e.touches[0].clientY-e.touches[1].clientY;
-      return Math.sqrt(dx*dx+dy*dy);
+
+    /** Get the distance between two touch points (for pinch zoom) */
+    function getTouchPinchDistance(e: TouchEvent): number {
+      const dx = e.touches[0].clientX - e.touches[1].clientX;
+      const dy = e.touches[0].clientY - e.touches[1].clientY;
+      return Math.sqrt(dx*dx + dy*dy);
     }
+
     function onTouchStart(e: TouchEvent) {
       e.preventDefault();
-      const s = storeRef.current;
-      if (e.touches.length===2) { pinchDistRef.current=pinchDist(e); return; }
-      const t=e.touches[0], r=canvas.getBoundingClientRect();
-      const cp={x:t.clientX-r.left,y:t.clientY-r.top}, wp=toWorld(cp);
-      if (s.isActiveGardenArchived()) { startPan(t.clientX,t.clientY); return; }
-      const pot=getPotAt(wp.x,wp.y);
-      if (pot) { modeRef.current='drag_pot'; s.selectPot(pot.id); dragOffsetRef.current={x:wp.x-pot.position.x,y:wp.y-pot.position.y}; }
-      else startPan(t.clientX,t.clientY);
+      const store = storeRef.current;
+
+      // Two fingers → start tracking pinch-to-zoom
+      if (e.touches.length === 2) {
+        lastPinchDistance.current = getTouchPinchDistance(e);
+        return;
+      }
+
+      // One finger
+      const touch = e.touches[0];
+      const rect  = canvas.getBoundingClientRect();
+      const canvasPoint = { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+      const worldPoint  = canvasToWorld(canvasPoint);
+
+      if (store.isActiveGardenArchived()) {
+        startPanning(touch.clientX, touch.clientY);
+        return;
+      }
+
+      const pot = getPotAtPosition(worldPoint.x, worldPoint.y);
+      if (pot) {
+        currentMode.current = 'drag_pot';
+        store.selectPot(pot.id);
+        dragOffset.current = {
+          x: worldPoint.x - pot.position.x,
+          y: worldPoint.y - pot.position.y,
+        };
+      } else {
+        startPanning(touch.clientX, touch.clientY);
+      }
     }
+
     function onTouchMove(e: TouchEvent) {
       e.preventDefault();
-      const s=storeRef.current;
-      if (e.touches.length===2 && pinchDistRef.current!==null) {
-        const nd=pinchDist(e), d=nd/pinchDistRef.current;
-        const cx=(e.touches[0].clientX+e.touches[1].clientX)/2, cy=(e.touches[0].clientY+e.touches[1].clientY)/2;
-        const r=canvas.getBoundingClientRect();
-        s.setView((cx-r.left)-(cx-r.left-s.viewX)*d, (cy-r.top)-(cy-r.top-s.viewY)*d, s.viewScale*d);
-        pinchDistRef.current=nd; return;
+      const store = storeRef.current;
+
+      // ── Pinch zoom ─────────────────────────────────────
+      if (e.touches.length === 2 && lastPinchDistance.current !== null) {
+        const newDistance  = getTouchPinchDistance(e);
+        const zoomFactor   = newDistance / lastPinchDistance.current;
+        const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+        const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+        const rect = canvas.getBoundingClientRect();
+        const cx = midX - rect.left;
+        const cy = midY - rect.top;
+        store.setView(
+          cx - (cx - store.viewX) * zoomFactor,
+          cy - (cy - store.viewY) * zoomFactor,
+          store.viewScale * zoomFactor,
+        );
+        lastPinchDistance.current = newDistance;
+        return;
       }
-      const t=e.touches[0], r=canvas.getBoundingClientRect();
-      const cp={x:t.clientX-r.left,y:t.clientY-r.top}, wp=toWorld(cp);
-      if (isPanningRef.current && panStartRef.current) { s.setView(t.clientX-panStartRef.current.x,t.clientY-panStartRef.current.y,s.viewScale); return; }
-      if (modeRef.current==='drag_pot' && s.selectedPotId) {
-        let nx=snapToGrid(wp.x-dragOffsetRef.current.x), ny=snapToGrid(wp.y-dragOffsetRef.current.y);
-        if (s.alignMode) ({x:nx,y:ny}=alignSnap(nx,ny,s.selectedPotId));
-        s.movePot(s.selectedPotId,nx,ny);
+
+      // ── Single finger pan or drag ──────────────────────
+      const touch = e.touches[0];
+      const rect  = canvas.getBoundingClientRect();
+      const canvasPoint = { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+      const worldPoint  = canvasToWorld(canvasPoint);
+
+      if (isPanning.current && panStart.current) {
+        store.setView(
+          touch.clientX - panStart.current.x,
+          touch.clientY - panStart.current.y,
+          store.viewScale,
+        );
+        return;
+      }
+
+      if (currentMode.current === 'drag_pot' && store.selectedPotId) {
+        let newX = snapToGrid(worldPoint.x - dragOffset.current.x);
+        let newY = snapToGrid(worldPoint.y - dragOffset.current.y);
+        if (store.alignMode) {
+          ({ x: newX, y: newY } = applyAlignSnap(newX, newY, store.selectedPotId));
+        }
+        store.movePot(store.selectedPotId, newX, newY);
       }
     }
+
     function onTouchEnd(e: TouchEvent) {
-      const s=storeRef.current; pinchDistRef.current=null;
-      if (e.touches.length===0) {
-        if (modeRef.current==='drag_pot') { s.pushHistory(); modeRef.current='none'; s.saveToStorage(); }
-        isPanningRef.current=false; panStartRef.current=null;
+      const store = storeRef.current;
+      lastPinchDistance.current = null;
+
+      // All fingers lifted
+      if (e.touches.length === 0) {
+        if (currentMode.current === 'drag_pot') {
+          store.pushHistory();
+          currentMode.current = 'none';
+          store.saveToStorage();
+        }
+        isPanning.current  = false;
+        panStart.current   = null;
       }
     }
-    canvas.addEventListener('touchstart',onTouchStart,{passive:false});
-    canvas.addEventListener('touchmove',onTouchMove,{passive:false});
-    canvas.addEventListener('touchend',onTouchEnd);
+
+    canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+    canvas.addEventListener('touchmove',  onTouchMove,  { passive: false });
+    canvas.addEventListener('touchend',   onTouchEnd);
+
     return () => {
-      canvas.removeEventListener('touchstart',onTouchStart);
-      canvas.removeEventListener('touchmove',onTouchMove);
-      canvas.removeEventListener('touchend',onTouchEnd);
+      canvas.removeEventListener('touchstart', onTouchStart);
+      canvas.removeEventListener('touchmove',  onTouchMove);
+      canvas.removeEventListener('touchend',   onTouchEnd);
     };
   }, []);
 
-  // keyboard
+
+  // ═══════════════════════════════════════════════════════════════
+  // SECTION 7: KEYBOARD SHORTCUTS
+  // ═══════════════════════════════════════════════════════════════
+
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      const tag=(document.activeElement as HTMLElement)?.tagName;
-      if (tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT') return;
-      const ctrl=e.ctrlKey||e.metaKey, s=storeRef.current;
-      if (ctrl&&e.key==='z'&&!e.shiftKey) { e.preventDefault(); s.undo(); return; }
-      if (ctrl&&(e.key==='y'||(e.key==='z'&&e.shiftKey))) { e.preventDefault(); s.redo(); return; }
-      if (e.key==='Escape') cancelDraw();
+      // Don't intercept keys when the user is typing in a form field
+      const tag = (document.activeElement as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      const isCtrlOrCmd = e.ctrlKey || e.metaKey;
+      const store = storeRef.current;
+
+      if (isCtrlOrCmd && e.key === 'z' && !e.shiftKey) { e.preventDefault(); store.undo(); return; }
+      if (isCtrlOrCmd && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); store.redo(); return; }
+      if (e.key === 'Escape') cancelDraw();
     }
-    window.addEventListener('keydown',onKeyDown);
-    return ()=>window.removeEventListener('keydown',onKeyDown);
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+
+  // ═══════════════════════════════════════════════════════════════
+  // SECTION 8: ACTIONS (exposed via CanvasHandle)
+  // ═══════════════════════════════════════════════════════════════
+
   function cancelDraw() {
-    if (modeRef.current==='draw_rect_drag') removeRectOverlay();
-    drawPolyRef.current=[]; drawStartRef.current=null; drawRectScreenStart.current=null;
-    modeRef.current='none';
-    if (canvasRef.current) canvasRef.current.style.cursor='default';
-  }
-  function applyZoom(d: number) {
-    const s=storeRef.current, canvas=canvasRef.current; if (!canvas) return;
-    const cx=canvas.width/2, cy=canvas.height/2;
-    s.setView(cx-(cx-s.viewX)*d, cy-(cy-s.viewY)*d, s.viewScale*d);
-  }
-  function fitToScreen() {
-    const { state }=storeRef.current, canvas=canvasRef.current; if (!canvas) return;
-    const allPts=[...state.beds.flatMap(b=>b.points),...state.pots.map(p=>p.position)];
-    if (allPts.length>=1) {
-      const xs=allPts.map(p=>p.x),ys=allPts.map(p=>p.y);
-      const lx=Math.min(...xs),rx=Math.max(...xs),ty=Math.min(...ys),by=Math.max(...ys);
-      const pad=80, sw=rx-lx||100, sh=by-ty||100;
-      const scale=Math.min((canvas.width-pad*2)/sw,(canvas.height-pad*2)/sh,4);
-      storeRef.current.setView((canvas.width-(lx+rx)*scale)/2,(canvas.height-(ty+by)*scale)/2,scale);
-    } else storeRef.current.setView(100,100,1);
+    if (currentMode.current === 'draw_rect_drag') removeRectOverlay();
+    polyPoints.current      = [];
+    rectWorldStart.current  = null;
+    rectScreenStart.current = null;
+    currentMode.current     = 'none';
+    if (canvasRef.current) canvasRef.current.style.cursor = 'default';
   }
 
+  /** Zoom in or out, keeping the canvas center fixed. */
+  function applyZoom(factor: number) {
+    const store  = storeRef.current;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const centerX = canvas.width / 2;
+    const centerY = canvas.height / 2;
+    store.setView(
+      centerX - (centerX - store.viewX) * factor,
+      centerY - (centerY - store.viewY) * factor,
+      store.viewScale * factor,
+    );
+  }
+
+  /** Pan and zoom so that all beds and pots are visible. */
+  function fitToScreen() {
+    const { state } = storeRef.current;
+    const canvas    = canvasRef.current;
+    if (!canvas) return;
+
+    // Collect every point in the scene
+    const allPoints = [
+      ...state.beds.flatMap(bed => bed.points),
+      ...state.pots.map(pot => pot.position),
+    ];
+
+    if (allPoints.length >= 1) {
+      const xs = allPoints.map(p => p.x);
+      const ys = allPoints.map(p => p.y);
+      const left   = Math.min(...xs), right  = Math.max(...xs);
+      const top    = Math.min(...ys), bottom = Math.max(...ys);
+      const padding = 80;
+      const contentW = right  - left || 100;
+      const contentH = bottom - top  || 100;
+
+      // Scale so content fills the canvas (but don't zoom in more than 4×)
+      const scale = Math.min(
+        (canvas.width  - padding * 2) / contentW,
+        (canvas.height - padding * 2) / contentH,
+        4,
+      );
+      // Center the content
+      storeRef.current.setView(
+        (canvas.width  - (left + right)  * scale) / 2,
+        (canvas.height - (top  + bottom) * scale) / 2,
+        scale,
+      );
+    } else {
+      storeRef.current.setView(100, 100, 1); // nothing to show, reset to origin
+    }
+  }
+
+  // Return the public API
   return {
-    startDrawRect() { cancelDraw(); modeRef.current='draw_rect'; storeRef.current.selectPot(null); if(canvasRef.current) canvasRef.current.style.cursor='crosshair'; },
-    startDrawPoly() { cancelDraw(); modeRef.current='draw_poly'; drawPolyRef.current=[]; if(canvasRef.current) canvasRef.current.style.cursor='crosshair'; },
+    startDrawRect() {
+      cancelDraw();
+      currentMode.current = 'draw_rect';
+      storeRef.current.selectPot(null);
+      if (canvasRef.current) canvasRef.current.style.cursor = 'crosshair';
+    },
+    startDrawPoly() {
+      cancelDraw();
+      currentMode.current = 'draw_poly';
+      polyPoints.current  = [];
+      if (canvasRef.current) canvasRef.current.style.cursor = 'crosshair';
+    },
     cancelDraw,
-    zoomIn:     ()=>applyZoom(1.2),
-    zoomOut:    ()=>applyZoom(0.83),
+    zoomIn:      () => applyZoom(1.2),
+    zoomOut:     () => applyZoom(0.83),
     fitToScreen,
-    toggleGrid: ()=>storeRef.current.setShowGrid(!storeRef.current.showGrid),
+    toggleGrid:  () => storeRef.current.setShowGrid(!storeRef.current.showGrid),
   };
 }
 
-// ── Module-level draw functions ────────────────────────────────────────────────
-type State = ReturnType<typeof useGardenStore.getState>['state'];
+
+// ═══════════════════════════════════════════════════════════════════
+// DRAWING FUNCTIONS
+// These are plain functions (not part of the hook) so they don't
+// re-create on every render. They just draw — no side effects.
+// ═══════════════════════════════════════════════════════════════════
+
+// Type aliases to avoid repeating long generics
+type State       = ReturnType<typeof useGardenStore.getState>['state'];
 type AppSettings = ReturnType<typeof useGardenStore.getState>['appSettings'];
 
-function drawGrid(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, state: State, viewX: number, viewY: number, viewScale: number) {
-  const pxPerCm=state.pxPerCm;
-  let stepWorldPx: number, stepLabel: string|null;
+
+/**
+ * Draws the background grid of lines.
+ *
+ * The grid automatically picks a "nice" spacing (10cm, 25cm, 50cm, etc.)
+ * so lines don't get too dense or too sparse when zoomed in/out.
+ */
+function drawGrid(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  state: State,
+  viewX: number,
+  viewY: number,
+  viewScale: number,
+) {
+  const pxPerCm = state.pxPerCm;
+  let stepWorldPx: number;
+  let stepLabel: string | null;
+
   if (pxPerCm) {
-    const cmSteps=[10,25,50,100,200,500,1000];
-    const targetCm=(60/viewScale)*(1/pxPerCm);
-    const niceCm=cmSteps.find(s=>s>=targetCm)??cmSteps[cmSteps.length-1];
-    stepWorldPx=niceCm*pxPerCm; stepLabel=niceCm>=100?`${niceCm/100}m`:`${niceCm}cm`;
-  } else { stepWorldPx=80/viewScale; stepLabel=null; }
-  const left=-viewX/viewScale, top=-viewY/viewScale;
-  const right=(canvas.width-viewX)/viewScale, bottom=(canvas.height-viewY)/viewScale;
-  const startX=Math.floor(left/stepWorldPx)*stepWorldPx, startY=Math.floor(top/stepWorldPx)*stepWorldPx;
-  ctx.strokeStyle='rgba(0,0,0,0.07)'; ctx.lineWidth=0.5/viewScale;
-  for(let x=startX;x<right+stepWorldPx;x+=stepWorldPx){ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,bottom);ctx.stroke();}
-  for(let y=startY;y<bottom+stepWorldPx;y+=stepWorldPx){ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(right,y);ctx.stroke();}
-  ctx.strokeStyle='rgba(0,0,0,0.13)'; ctx.lineWidth=1/viewScale;
-  for(let x=startX;x<right+stepWorldPx*5;x+=stepWorldPx*5){ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,bottom);ctx.stroke();}
-  for(let y=startY;y<bottom+stepWorldPx*5;y+=stepWorldPx*5){ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(right,y);ctx.stroke();}
-  if (stepLabel&&pxPerCm) {
-    ctx.fillStyle='rgba(80,60,30,0.4)'; ctx.font=`${11/viewScale}px DM Sans`; ctx.textBaseline='top';
-    for(let x=Math.ceil(left/stepWorldPx)*stepWorldPx;x<right;x+=stepWorldPx){
-      const cm=Math.round(x/pxPerCm);
-      ctx.fillText(cm>=100?`${(cm/100).toFixed(cm%100===0?0:1)}m`:`${cm}cm`,x+2/viewScale,top+2/viewScale);
+    // Pick a round number of cm so grid labels are clean
+    const niceStepsCm = [10, 25, 50, 100, 200, 500, 1000];
+    const targetCm    = (60 / viewScale) * (1 / pxPerCm); // aim for ~60px between lines
+    const chosenCm    = niceStepsCm.find(s => s >= targetCm) ?? niceStepsCm[niceStepsCm.length - 1];
+    stepWorldPx = chosenCm * pxPerCm;
+    stepLabel   = chosenCm >= 100 ? `${chosenCm/100}m` : `${chosenCm}cm`;
+  } else {
+    // No scale set yet — use a fixed pixel spacing
+    stepWorldPx = 80 / viewScale;
+    stepLabel   = null;
+  }
+
+  // Calculate visible world-space bounds (so we only draw what's on screen)
+  const left   = -viewX / viewScale;
+  const top    = -viewY / viewScale;
+  const right  = (canvas.width  - viewX) / viewScale;
+  const bottom = (canvas.height - viewY) / viewScale;
+
+  // Start on a grid-aligned position just off the left/top edge
+  const startX = Math.floor(left / stepWorldPx) * stepWorldPx;
+  const startY = Math.floor(top  / stepWorldPx) * stepWorldPx;
+
+  // Fine grid lines (lighter)
+  ctx.strokeStyle = 'rgba(0,0,0,0.07)';
+  ctx.lineWidth   = 0.5 / viewScale;
+  for (let x = startX; x < right  + stepWorldPx; x += stepWorldPx) {
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+  }
+  for (let y = startY; y < bottom + stepWorldPx; y += stepWorldPx) {
+    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
+  }
+
+  // Major grid lines every 5 steps (darker)
+  ctx.strokeStyle = 'rgba(0,0,0,0.13)';
+  ctx.lineWidth   = 1 / viewScale;
+  for (let x = startX; x < right  + stepWorldPx*5; x += stepWorldPx*5) {
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+  }
+  for (let y = startY; y < bottom + stepWorldPx*5; y += stepWorldPx*5) {
+    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
+  }
+
+  // Labels along the top-left of each grid column
+  if (stepLabel && pxPerCm) {
+    ctx.fillStyle    = 'rgba(80,60,30,0.4)';
+    ctx.font         = `${11/viewScale}px DM Sans`;
+    ctx.textBaseline = 'top';
+    for (let x = Math.ceil(left/stepWorldPx)*stepWorldPx; x < right; x += stepWorldPx) {
+      const cm = Math.round(x / pxPerCm);
+      const label = cm >= 100 ? `${(cm/100).toFixed(cm % 100 === 0 ? 0 : 1)}m` : `${cm}cm`;
+      ctx.fillText(label, x + 2/viewScale, top + 2/viewScale);
     }
   } else {
-    ctx.fillStyle='rgba(80,60,30,0.25)'; ctx.font=`${12/viewScale}px DM Sans`; ctx.textBaseline='top';
-    ctx.fillText('Draw a garden bed, then set scale →',left+10/viewScale,top+10/viewScale);
+    // Prompt the user to set a scale before the grid makes sense
+    ctx.fillStyle    = 'rgba(80,60,30,0.25)';
+    ctx.font         = `${12/viewScale}px DM Sans`;
+    ctx.textBaseline = 'top';
+    ctx.fillText('Draw a garden bed, then set scale →', left + 10/viewScale, top + 10/viewScale);
   }
 }
 
-function drawAllBeds(ctx: CanvasRenderingContext2D, state: State, selectedBedId: number|null, viewScale: number) {
+
+/** Draws all beds in the garden state */
+function drawAllBeds(
+  ctx: CanvasRenderingContext2D,
+  state: State,
+  selectedBedId: number | null,
+  viewScale: number,
+) {
   state.beds.forEach(bed => drawBed(ctx, bed, state, selectedBedId, viewScale));
 }
 
+
+/**
+ * Draws one garden bed, including:
+ *   - filled soil colour
+ *   - soil texture grid overlay
+ *   - border / selection highlight
+ *   - corner handle dots
+ *   - centre label (name or dimensions)
+ *   - per-edge dimension labels (when selected)
+ */
 function drawBed(
   ctx: CanvasRenderingContext2D,
   bed: Bed,
   state: State,
   selectedBedId: number | null,
-  viewScale: number
+  viewScale: number,
 ) {
-  // Need at least 3 points to draw a shape
-  if (bed.points.length < 3) return;
+  if (bed.points.length < 3) return; // can't draw a shape with fewer than 3 points
 
-  const soilColor = SOIL_COLORS.find(c => c.id === bed.soilColor) ?? SOIL_COLORS[0];
+  const soilColor  = SOIL_COLORS.find(c => c.id === bed.soilColor) ?? SOIL_COLORS[0];
   const isSelected = bed.id === selectedBedId;
 
-  // ── 1. Draw filled bed shape ─────────────────────────
+  // ── 1. Filled bed shape ───────────────────────────────
   ctx.save();
   ctx.beginPath();
   ctx.moveTo(bed.points[0].x, bed.points[0].y);
@@ -436,11 +1008,11 @@ function drawBed(
   ctx.fillStyle = soilColor.hex;
   ctx.fill();
 
-  // ── 2. Draw soil texture grid lines (clipped inside bed) ─
+  // ── 2. Soil texture: subtle grid lines clipped inside shape ──
   ctx.save();
-  ctx.clip(); // restrict drawing to inside the bed shape
+  ctx.clip(); // anything drawn now is clipped to the bed shape
   ctx.strokeStyle = 'rgba(0,0,0,0.06)';
-  ctx.lineWidth = 0.8 / viewScale;
+  ctx.lineWidth   = 0.8 / viewScale;
 
   const xs = bed.points.map(p => p.x);
   const ys = bed.points.map(p => p.y);
@@ -455,16 +1027,13 @@ function drawBed(
   }
   ctx.restore(); // end clip
 
-  // ── 3. Draw bed outline border ───────────────────────
-  // 🎨 Change '#5c4a35' to remove/change the brown border on unselected beds
-  //ctx.strokeStyle = isSelected ? '#4a7c59' : '#5c4a35';
-  //ctx.lineWidth = isSelected ? 3 / viewScale : 2.5 / viewScale;
-  if (isSelected) ctx.setLineDash([6 / viewScale, 3 / viewScale]); // dashed when selected
-  //ctx.stroke();
-  ctx.setLineDash([]); // reset dash
+  // ── 3. Border ─────────────────────────────────────────
+  // (currently commented out in original — uncomment & edit to re-enable)
+  if (isSelected) ctx.setLineDash([6/viewScale, 3/viewScale]);
+  ctx.setLineDash([]);
   ctx.restore();
 
-  // ── 4. Draw corner handle dots ───────────────────────
+  // ── 4. Corner handle dots ─────────────────────────────
   bed.points.forEach(pt => {
     ctx.beginPath();
     ctx.arc(pt.x, pt.y, (isSelected ? 6 : 4) / viewScale, 0, Math.PI * 2);
@@ -472,7 +1041,7 @@ function drawBed(
     ctx.fill();
   });
 
-  // ── 5. Draw centre label (name or dimensions) ────────
+  // ── 5. Centre label ───────────────────────────────────
   const centerX = bed.points.reduce((sum, p) => sum + p.x, 0) / bed.points.length;
   const centerY = bed.points.reduce((sum, p) => sum + p.y, 0) / bed.points.length;
   const displayMode = bed.displayMode ?? 'name';
@@ -480,10 +1049,10 @@ function drawBed(
   if (displayMode !== 'none') {
     ctx.save();
     ctx.translate(centerX, centerY);
-    ctx.textAlign = 'center';
+    ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
     const fontSize = 14 / viewScale;
-    ctx.font = `500 ${fontSize}px DM Sans`;
+    ctx.font      = `500 ${fontSize}px DM Sans`;
     ctx.fillStyle = 'rgba(255,255,255,0.85)';
 
     if (displayMode === 'name') {
@@ -491,12 +1060,12 @@ function drawBed(
 
     } else if (displayMode === 'dims' && state.pxPerCm) {
       if (isRectBed(bed)) {
-        // Rectangle: show width × height
+        // Rectangle: "width × height"
         const w = edgeLenCm(bed.points[0], bed.points[1], state.pxPerCm);
         const h = edgeLenCm(bed.points[1], bed.points[2], state.pxPerCm);
         ctx.fillText(`${fmtDim(w)} × ${fmtDim(h)}`, 0, 0);
       } else {
-        // Polygon: show approximate area
+        // Polygon: approximate area in m²
         const areaCm2 = shoelaceArea(bed.points) / (state.pxPerCm * state.pxPerCm);
         ctx.fillText(`~${(areaCm2 / 10000).toFixed(2)}m²`, 0, 0);
       }
@@ -504,37 +1073,40 @@ function drawBed(
     ctx.restore();
   }
 
-  // ── 6. Draw edge dimension labels (only when selected + dims mode) ──
+  // ── 6. Per-edge dimension labels (only when selected + dims mode) ──
   if (isSelected && displayMode === 'dims' && state.pxPerCm) {
     ctx.save();
-    ctx.font = `${10 / viewScale}px DM Sans`;
-    ctx.textAlign = 'center';
+    ctx.font         = `${10/viewScale}px DM Sans`;
+    ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
 
     for (let i = 0; i < bed.points.length; i++) {
-      const a = bed.points[i];
-      const b = bed.points[(i + 1) % bed.points.length]; // wrap to first point
+      const pointA = bed.points[i];
+      const pointB = bed.points[(i + 1) % bed.points.length]; // wrap around to first point
 
-      // Midpoint of this edge
-      const midX = (a.x + b.x) / 2;
-      const midY = (a.y + b.y) / 2;
+      const midX = (pointA.x + pointB.x) / 2;
+      const midY = (pointA.y + pointB.y) / 2;
+      const len  = edgeLenCm(pointA, pointB, state.pxPerCm);
 
-      const len = edgeLenCm(a, b, state.pxPerCm);
+      // Calculate a perpendicular offset so the label floats beside the edge
+      const edgeDx  = pointB.x - pointA.x;
+      const edgeDy  = pointB.y - pointA.y;
+      const edgeMag = Math.sqrt(edgeDx*edgeDx + edgeDy*edgeDy) || 1;
+      const offsetX = (-edgeDy / edgeMag) * 14 / viewScale;
+      const offsetY = ( edgeDx / edgeMag) * 14 / viewScale;
 
-      // Offset label perpendicular to the edge
-      const dx = b.x - a.x, dy = b.y - a.y;
-      const mag = Math.sqrt(dx * dx + dy * dy) || 1;
-      const offsetX = (-dy / mag) * 14 / viewScale;
-      const offsetY = (dx / mag) * 14 / viewScale;
-
-      // Draw white pill background behind label
-      const label = fmtDim(len);
+      // White pill background behind the label
+      const label     = fmtDim(len);
       const textWidth = ctx.measureText(label).width;
-      const pad = 3 / viewScale;
+      const pad       = 3 / viewScale;
       ctx.fillStyle = 'rgba(255,255,255,0.82)';
-      ctx.fillRect(midX + offsetX - textWidth / 2 - pad, midY + offsetY - 6 / viewScale, textWidth + pad * 2, 12 / viewScale);
+      ctx.fillRect(
+        midX + offsetX - textWidth/2 - pad,
+        midY + offsetY - 6/viewScale,
+        textWidth + pad*2,
+        12/viewScale,
+      );
 
-      // Draw label text
       ctx.fillStyle = 'rgba(44,36,22,0.85)';
       ctx.fillText(label, midX + offsetX, midY + offsetY);
     }
@@ -542,85 +1114,251 @@ function drawBed(
   }
 }
 
-function roundedRect(ctx: CanvasRenderingContext2D,x:number,y:number,w:number,h:number,r:number){
-  r=Math.min(r,w/2,h/2);
-  ctx.beginPath(); ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.arcTo(x+w,y,x+w,y+r,r);
-  ctx.lineTo(x+w,y+h-r); ctx.arcTo(x+w,y+h,x+w-r,y+h,r); ctx.lineTo(x+r,y+h);
-  ctx.arcTo(x,y+h,x,y+h-r,r); ctx.lineTo(x,y+r); ctx.arcTo(x,y,x+r,y,r); ctx.closePath();
+
+/**
+ * Draws a rounded rectangle path (helper for drawPotsAll).
+ * Built-in `roundRect` isn't available in all browsers yet.
+ */
+function roundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number,
+  w: number, h: number,
+  r: number,
+) {
+  r = Math.min(r, w/2, h/2); // clamp radius so it fits
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);             ctx.arcTo(x+w, y,   x+w, y+r,   r);
+  ctx.lineTo(x + w, y + h - r);         ctx.arcTo(x+w, y+h, x+w-r, y+h, r);
+  ctx.lineTo(x + r, y + h);             ctx.arcTo(x,   y+h, x,   y+h-r, r);
+  ctx.lineTo(x, y + r);                 ctx.arcTo(x,   y,   x+r, y,     r);
+  ctx.closePath();
 }
 
-function drawPotsAll(ctx: CanvasRenderingContext2D, state: State, selectedPotId: number|null, viewScale: number, appSettings: AppSettings) {
-  const allColors=[...COLORS,...(appSettings.customPotColors??[]).filter((c): c is {id:string;name:string;hex:string}=>c!==null)];
-  state.pots.forEach((pot,idx)=>{
-    const col=allColors.find(c=>c.id===pot.color)??allColors[0];
-    const pxPerCm=state.pxPerCm??2, pw=pot.width_cm*pxPerCm, ph=pot.height_cm*pxPerCm;
-    const px=pot.position.x,py=pot.position.y,sel=pot.id===selectedPotId;
-    const inAnyBed=state.beds.some(b=>b.points.length>=3&&isInPoly(px,py,b.points));
-    const outOfBounds=state.beds.length>=1&&!inAnyBed;
-    let overlapping=false;
+
+/**
+ * Draws all pots, with visual indicators for:
+ *   - selected (dashed green outline)
+ *   - out of beds (semi-transparent orange)
+ *   - overlapping another pot (red)
+ */
+function drawPotsAll(
+  ctx: CanvasRenderingContext2D,
+  state: State,
+  selectedPotId: number | null,
+  viewScale: number,
+  appSettings: AppSettings,
+) {
+  // Merge built-in colours with any user-defined custom colours
+  const allColors = [
+    ...COLORS,
+    ...(appSettings.customPotColors ?? []).filter(
+      (c): c is {id:string; name:string; hex:string} => c !== null,
+    ),
+  ];
+
+  state.pots.forEach((pot, index) => {
+    const color  = allColors.find(c => c.id === pot.color) ?? allColors[0];
+    const pxPerCm = state.pxPerCm ?? 2;
+    const potW    = pot.width_cm  * pxPerCm;
+    const potH    = pot.height_cm * pxPerCm;
+    const px      = pot.position.x;
+    const py      = pot.position.y;
+    const isSelected = pot.id === selectedPotId;
+
+    // Is this pot inside any bed?
+    const inAnyBed    = state.beds.some(b => b.points.length >= 3 && isInPoly(px, py, b.points));
+    const outOfBounds = state.beds.length >= 1 && !inAnyBed;
+
+    // Is this pot overlapping another pot?
+    let isOverlapping = false;
     if (!appSettings.allowOverlap) {
-      const margin=(appSettings.potMarginCm??0)*pxPerCm;
-      for(const o of state.pots){
-        if(o.id===pot.id) continue;
-        const dx=o.position.x-px,dy=o.position.y-py,dist=Math.sqrt(dx*dx+dy*dy);
-        const r1=Math.max(pot.width_cm,pot.height_cm)/2*pxPerCm,r2=Math.max(o.width_cm,o.height_cm)/2*pxPerCm;
-        if(dist<r1+r2+margin){overlapping=true;break;}
+      const marginPx = (appSettings.potMarginCm ?? 0) * pxPerCm;
+      for (const otherPot of state.pots) {
+        if (otherPot.id === pot.id) continue;
+        const dx   = otherPot.position.x - px;
+        const dy   = otherPot.position.y - py;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        const r1   = Math.max(pot.width_cm,      pot.height_cm)      / 2 * pxPerCm;
+        const r2   = Math.max(otherPot.width_cm, otherPot.height_cm) / 2 * pxPerCm;
+        if (dist < r1 + r2 + marginPx) { isOverlapping = true; break; }
       }
     }
-    ctx.save(); ctx.translate(px,py); ctx.rotate(pot.rotation*Math.PI/180);
-    ctx.shadowColor='rgba(0,0,0,0.22)'; ctx.shadowBlur=8/viewScale; ctx.shadowOffsetX=2/viewScale; ctx.shadowOffsetY=3/viewScale;
+
+    // ── Draw pot body ──────────────────────────────────
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(pot.rotation * Math.PI / 180);
+
+    // Drop shadow
+    ctx.shadowColor    = 'rgba(0,0,0,0.22)';
+    ctx.shadowBlur     = 8 / viewScale;
+    ctx.shadowOffsetX  = 2 / viewScale;
+    ctx.shadowOffsetY  = 3 / viewScale;
+
+    // Fill: red if overlapping, faded orange if out of bounds, otherwise pot colour
     ctx.beginPath();
-    if(pot.shape==='round') ctx.arc(0,0,pw/2,0,Math.PI*2); else roundedRect(ctx,-pw/2,-ph/2,pw,ph,Math.min(pw,ph)*0.12);
-    ctx.fillStyle=overlapping?'#e74c3c':(outOfBounds?'rgba(193,101,74,0.6)':col.hex); ctx.fill(); ctx.shadowColor='transparent';
+    if (pot.shape === 'round') ctx.arc(0, 0, potW/2, 0, Math.PI*2);
+    else roundedRect(ctx, -potW/2, -potH/2, potW, potH, Math.min(potW, potH) * 0.12);
+    ctx.fillStyle = isOverlapping ? '#e74c3c' : outOfBounds ? 'rgba(193,101,74,0.6)' : color.hex;
+    ctx.fill();
+    ctx.shadowColor = 'transparent'; // turn off shadow for subsequent strokes
+
+    // Inner shine ring (subtle highlight to suggest depth)
     ctx.beginPath();
-    if(pot.shape==='round') ctx.arc(0,0,pw/2*0.82,0,Math.PI*2); else roundedRect(ctx,-pw/2*0.88,-ph/2*0.88,pw*0.88,ph*0.88,Math.min(pw,ph)*0.08);
-    ctx.strokeStyle='rgba(255,255,255,0.2)'; ctx.lineWidth=1.5/viewScale; ctx.stroke();
+    if (pot.shape === 'round') ctx.arc(0, 0, potW/2*0.82, 0, Math.PI*2);
+    else roundedRect(ctx, -potW/2*0.88, -potH/2*0.88, potW*0.88, potH*0.88, Math.min(potW,potH)*0.08);
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.lineWidth   = 1.5 / viewScale;
+    ctx.stroke();
+
+    // Outer border (white when selected, dark when not)
     ctx.beginPath();
-    if(pot.shape==='round') ctx.arc(0,0,pw/2,0,Math.PI*2); else roundedRect(ctx,-pw/2,-ph/2,pw,ph,Math.min(pw,ph)*0.12);
-    ctx.strokeStyle=sel?'rgba(255,255,255,0.9)':'rgba(0,0,0,0.22)'; ctx.lineWidth=sel?2.5/viewScale:1.5/viewScale; ctx.stroke();
-    if(sel){
-      const pad=5/viewScale; ctx.beginPath();
-      if(pot.shape==='round') ctx.arc(0,0,pw/2+pad,0,Math.PI*2); else roundedRect(ctx,-pw/2-pad,-ph/2-pad,pw+pad*2,ph+pad*2,Math.min(pw,ph)*0.12+pad);
-      ctx.strokeStyle='#4a7c59'; ctx.lineWidth=2/viewScale; ctx.setLineDash([5/viewScale,3/viewScale]); ctx.stroke(); ctx.setLineDash([]);
+    if (pot.shape === 'round') ctx.arc(0, 0, potW/2, 0, Math.PI*2);
+    else roundedRect(ctx, -potW/2, -potH/2, potW, potH, Math.min(potW,potH)*0.12);
+    ctx.strokeStyle = isSelected ? 'rgba(255,255,255,0.9)' : 'rgba(0,0,0,0.22)';
+    ctx.lineWidth   = isSelected ? 2.5/viewScale : 1.5/viewScale;
+    ctx.stroke();
+
+    // Dashed green selection ring
+    if (isSelected) {
+      const pad = 5 / viewScale;
+      ctx.beginPath();
+      if (pot.shape === 'round') ctx.arc(0, 0, potW/2 + pad, 0, Math.PI*2);
+      else roundedRect(ctx, -potW/2-pad, -potH/2-pad, potW+pad*2, potH+pad*2, Math.min(potW,potH)*0.12+pad);
+      ctx.strokeStyle = '#4a7c59';
+      ctx.lineWidth   = 2 / viewScale;
+      ctx.setLineDash([5/viewScale, 3/viewScale]);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
+
     ctx.restore();
-    ctx.save(); ctx.translate(px,py);
-    const fontSize=Math.max(7,Math.min(13,pw*0.28))/viewScale;
-    ctx.textAlign='center'; ctx.textBaseline='middle';
-    const dm=pot.displayMode??'name';
-    const plant=state.plants.find(pl=>String(pl.id)===String(pot.plantId));
-    if(dm!=='none'){
-      let t='';
-      if(dm==='name') t=pot.label??'';
-      else if(dm==='emoji') t=pot.emoji??'🏺';
-      else if(dm==='dims') t=pot.shape==='round'?`⌀${pot.width_cm}`:`${pot.width_cm}×${pot.height_cm}`;
-      if(t){ ctx.font=`bold ${fontSize}px DM Sans`; ctx.fillStyle='rgba(255,255,255,0.92)'; ctx.fillText(t,0,plant?-fontSize*0.65:0); }
+
+    // ── Draw pot label & plant emoji ──────────────────
+    ctx.save();
+    ctx.translate(px, py);
+    const fontSize = Math.max(7, Math.min(13, potW * 0.28)) / viewScale;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+
+    const displayMode = pot.displayMode ?? 'name';
+    const plant       = state.plants.find(pl => String(pl.id) === String(pot.plantId));
+
+    if (displayMode !== 'none') {
+      let labelText = '';
+      if      (displayMode === 'name')  labelText = pot.label ?? '';
+      else if (displayMode === 'emoji') labelText = pot.emoji ?? '🏺';
+      else if (displayMode === 'dims')  labelText = pot.shape === 'round'
+        ? `⌀${pot.width_cm}`
+        : `${pot.width_cm}×${pot.height_cm}`;
+
+      if (labelText) {
+        ctx.font      = `bold ${fontSize}px DM Sans`;
+        ctx.fillStyle = 'rgba(255,255,255,0.92)';
+        // Shift up slightly if there's also a plant emoji below
+        ctx.fillText(labelText, 0, plant ? -fontSize * 0.65 : 0);
+      }
     }
-    if(plant){ ctx.font=`${fontSize*0.9}px DM Sans`; ctx.fillStyle='rgba(255,255,255,0.85)'; ctx.fillText(plant.emoji||'🌱',0,dm==='none'?0:fontSize*0.72); }
-    const br=9/viewScale,bx=pw/2*0.65,by2=-ph/2*0.65;
-    ctx.beginPath(); ctx.arc(bx,by2,br,0,Math.PI*2); ctx.fillStyle='rgba(30,22,10,0.75)'; ctx.fill();
-    ctx.font=`bold ${7.5/viewScale}px DM Sans`; ctx.fillStyle='white'; ctx.fillText(String(idx+1),bx,by2);
+
+    if (plant) {
+      ctx.font      = `${fontSize * 0.9}px DM Sans`;
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      ctx.fillText(plant.emoji || '🌱', 0, displayMode === 'none' ? 0 : fontSize * 0.72);
+    }
+
+    // ── Small numbered badge (1, 2, 3…) ───────────────
+    const badgeRadius = 9 / viewScale;
+    const badgeX      = potW/2 * 0.65;
+    const badgeY      = -potH/2 * 0.65;
+    ctx.beginPath();
+    ctx.arc(badgeX, badgeY, badgeRadius, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(30,22,10,0.75)';
+    ctx.fill();
+    ctx.font      = `bold ${7.5/viewScale}px DM Sans`;
+    ctx.fillStyle = 'white';
+    ctx.fillText(String(index + 1), badgeX, badgeY);
+
     ctx.restore();
   });
 }
 
-function drawAlignmentGuides(ctx: CanvasRenderingContext2D,state: State,selectedPotId: number,viewX: number,viewY: number,canvas: HTMLCanvasElement,viewScale: number){
-  const pot=state.pots.find(p=>p.id===selectedPotId); if(!pot) return;
-  const T=8/viewScale,hLines: number[]=[],vLines: number[]=[];
-  state.pots.forEach(o=>{ if(o.id===pot.id) return; if(Math.abs(pot.position.x-o.position.x)<T) vLines.push(o.position.x); if(Math.abs(pot.position.y-o.position.y)<T) hLines.push(o.position.y); });
-  const left=-viewX/viewScale,right=(canvas.width-viewX)/viewScale,top=-viewY/viewScale,bottom=(canvas.height-viewY)/viewScale;
-  ctx.save(); ctx.strokeStyle='rgba(74,124,89,0.7)'; ctx.lineWidth=1/viewScale; ctx.setLineDash([4/viewScale,4/viewScale]);
-  hLines.forEach(y=>{ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(right,y);ctx.stroke();});
-  vLines.forEach(x=>{ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,bottom);ctx.stroke();});
-  ctx.setLineDash([]); ctx.restore();
+
+/**
+ * Draws dotted green guide lines through pots that share the same
+ * X or Y coordinate as the pot being dragged — helps with alignment.
+ */
+function drawAlignmentGuides(
+  ctx: CanvasRenderingContext2D,
+  state: State,
+  selectedPotId: number,
+  viewX: number,
+  viewY: number,
+  canvas: HTMLCanvasElement,
+  viewScale: number,
+) {
+  const draggedPot = state.pots.find(p => p.id === selectedPotId);
+  if (!draggedPot) return;
+
+  const snapThreshold = 8 / viewScale;
+  const horizontalGuides: number[] = []; // Y positions of matching pots
+  const verticalGuides:   number[] = []; // X positions of matching pots
+
+  for (const other of state.pots) {
+    if (other.id === draggedPot.id) continue;
+    if (Math.abs(draggedPot.position.x - other.position.x) < snapThreshold) verticalGuides.push(other.position.x);
+    if (Math.abs(draggedPot.position.y - other.position.y) < snapThreshold) horizontalGuides.push(other.position.y);
+  }
+
+  // Lines need to span the full visible area
+  const left   = -viewX / viewScale;
+  const right  = (canvas.width  - viewX) / viewScale;
+  const top    = -viewY / viewScale;
+  const bottom = (canvas.height - viewY) / viewScale;
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(74,124,89,0.7)';
+  ctx.lineWidth   = 1 / viewScale;
+  ctx.setLineDash([4/viewScale, 4/viewScale]);
+
+  horizontalGuides.forEach(y => {
+    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
+  });
+  verticalGuides.forEach(x => {
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+  });
+
+  ctx.setLineDash([]);
+  ctx.restore();
 }
 
-function drawArchivedBanner(ctx: CanvasRenderingContext2D,canvas: HTMLCanvasElement){
-  const msg='🔒  Archived — read only',pad=12,h=36,y=canvas.height-h-12;
-  ctx.save(); ctx.font='500 13px DM Sans';
-  const tw=ctx.measureText(msg).width,x=(canvas.width-tw-pad*2)/2;
-  ctx.fillStyle='rgba(180,130,40,0.92)';
+
+/**
+ * Draws a semi-transparent amber banner at the bottom of the canvas
+ * to remind the user the garden is read-only.
+ */
+function drawArchivedBanner(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) {
+  const message  = '🔒  Archived — read only';
+  const padding  = 12;
+  const height   = 36;
+  const bannerY  = canvas.height - height - 12;
+
+  ctx.save();
+  ctx.font = '500 13px DM Sans';
+  const textWidth = ctx.measureText(message).width;
+  const bannerX   = (canvas.width - textWidth - padding*2) / 2; // centred
+
+  ctx.fillStyle = 'rgba(180,130,40,0.92)';
   ctx.beginPath();
-  if ((ctx as any).roundRect) (ctx as any).roundRect(x,y,tw+pad*2,h,8); else ctx.rect(x,y,tw+pad*2,h);
-  ctx.fill(); ctx.fillStyle='white'; ctx.textBaseline='middle'; ctx.fillText(msg,x+pad,y+h/2); ctx.restore();
+  if ((ctx as any).roundRect) {
+    (ctx as any).roundRect(bannerX, bannerY, textWidth + padding*2, height, 8);
+  } else {
+    ctx.rect(bannerX, bannerY, textWidth + padding*2, height);
+  }
+  ctx.fill();
+
+  ctx.fillStyle    = 'white';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(message, bannerX + padding, bannerY + height/2);
+  ctx.restore();
 }
