@@ -412,59 +412,131 @@ function drawAllBeds(ctx: CanvasRenderingContext2D, state: State, selectedBedId:
   state.beds.forEach(bed => drawBed(ctx, bed, state, selectedBedId, viewScale));
 }
 
-function drawBed(ctx: CanvasRenderingContext2D, bed: Bed, state: State, selectedBedId: number|null, viewScale: number) {
-  if (bed.points.length<3) return;
-  const sc=SOIL_COLORS.find(c=>c.id===bed.soilColor)??SOIL_COLORS[0];
-  const sel=bed.id===selectedBedId;
+function drawBed(
+  ctx: CanvasRenderingContext2D,
+  bed: Bed,
+  state: State,
+  selectedBedId: number | null,
+  viewScale: number
+) {
+  // Need at least 3 points to draw a shape
+  if (bed.points.length < 3) return;
+
+  const soilColor = SOIL_COLORS.find(c => c.id === bed.soilColor) ?? SOIL_COLORS[0];
+  const isSelected = bed.id === selectedBedId;
+
+  // ── 1. Draw filled bed shape ─────────────────────────
   ctx.save();
-  ctx.beginPath(); ctx.moveTo(bed.points[0].x,bed.points[0].y);
-  for(let i=1;i<bed.points.length;i++) ctx.lineTo(bed.points[i].x,bed.points[i].y);
-  ctx.closePath(); ctx.fillStyle=sc.hex; ctx.fill();
-  ctx.save(); ctx.clip();
-  ctx.strokeStyle='rgba(0,0,0,0.06)'; ctx.lineWidth=0.8/viewScale;
-  const xs=bed.points.map(p=>p.x),ys=bed.points.map(p=>p.y);
-  const bx=Math.min(...xs),bX=Math.max(...xs),by=Math.min(...ys),bY=Math.max(...ys);
-  for(let x=bx;x<bX;x+=18){ctx.beginPath();ctx.moveTo(x,by);ctx.lineTo(x,bY);ctx.stroke();}
-  for(let y=by;y<bY;y+=18){ctx.beginPath();ctx.moveTo(bx,y);ctx.lineTo(bX,y);ctx.stroke();}
+  ctx.beginPath();
+  ctx.moveTo(bed.points[0].x, bed.points[0].y);
+  for (let i = 1; i < bed.points.length; i++) {
+    ctx.lineTo(bed.points[i].x, bed.points[i].y);
+  }
+  ctx.closePath();
+  ctx.fillStyle = soilColor.hex;
+  ctx.fill();
+
+  // ── 2. Draw soil texture grid lines (clipped inside bed) ─
+  ctx.save();
+  ctx.clip(); // restrict drawing to inside the bed shape
+  ctx.strokeStyle = 'rgba(0,0,0,0.06)';
+  ctx.lineWidth = 0.8 / viewScale;
+
+  const xs = bed.points.map(p => p.x);
+  const ys = bed.points.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+
+  for (let x = minX; x < maxX; x += 18) {
+    ctx.beginPath(); ctx.moveTo(x, minY); ctx.lineTo(x, maxY); ctx.stroke();
+  }
+  for (let y = minY; y < maxY; y += 18) {
+    ctx.beginPath(); ctx.moveTo(minX, y); ctx.lineTo(maxX, y); ctx.stroke();
+  }
+  ctx.restore(); // end clip
+
+  // ── 3. Draw bed outline border ───────────────────────
+  // 🎨 Change '#5c4a35' to remove/change the brown border on unselected beds
+  //ctx.strokeStyle = isSelected ? '#4a7c59' : '#5c4a35';
+  //ctx.lineWidth = isSelected ? 3 / viewScale : 2.5 / viewScale;
+  if (isSelected) ctx.setLineDash([6 / viewScale, 3 / viewScale]); // dashed when selected
+  //ctx.stroke();
+  ctx.setLineDash([]); // reset dash
   ctx.restore();
-  ctx.strokeStyle=sel?'#4a7c59':'#5c4a35'; ctx.lineWidth=sel?3/viewScale:2.5/viewScale;
-  if(sel) ctx.setLineDash([6/viewScale,3/viewScale]);
-  ctx.stroke(); ctx.setLineDash([]); ctx.restore();
-  bed.points.forEach(pt=>{
-    ctx.beginPath(); ctx.arc(pt.x,pt.y,(sel?6:4)/viewScale,0,Math.PI*2);
-    ctx.fillStyle=sel?'#4a7c59':'#8b6e4b'; ctx.fill();
+
+  // ── 4. Draw corner handle dots ───────────────────────
+  bed.points.forEach(pt => {
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, (isSelected ? 6 : 4) / viewScale, 0, Math.PI * 2);
+    ctx.fillStyle = isSelected ? '#4a7c59' : '#8b6e4b';
+    ctx.fill();
   });
-  const cx=bed.points.reduce((a,p)=>a+p.x,0)/bed.points.length;
-  const cy=bed.points.reduce((a,p)=>a+p.y,0)/bed.points.length;
-  const dm=bed.displayMode??'name';
-  if (dm!=='none') {
-    ctx.save(); ctx.translate(cx,cy); ctx.textAlign='center'; ctx.textBaseline='middle';
-    const fs=14/viewScale; ctx.font=`500 ${fs}px DM Sans`; ctx.fillStyle='rgba(255,255,255,0.85)';
-    if (dm==='name') { ctx.fillText(bed.label,0,0); }
-    else if (dm==='dims'&&state.pxPerCm) {
+
+  // ── 5. Draw centre label (name or dimensions) ────────
+  const centerX = bed.points.reduce((sum, p) => sum + p.x, 0) / bed.points.length;
+  const centerY = bed.points.reduce((sum, p) => sum + p.y, 0) / bed.points.length;
+  const displayMode = bed.displayMode ?? 'name';
+
+  if (displayMode !== 'none') {
+    ctx.save();
+    ctx.translate(centerX, centerY);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const fontSize = 14 / viewScale;
+    ctx.font = `500 ${fontSize}px DM Sans`;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+
+    if (displayMode === 'name') {
+      ctx.fillText(bed.label, 0, 0);
+
+    } else if (displayMode === 'dims' && state.pxPerCm) {
       if (isRectBed(bed)) {
-        const w=edgeLenCm(bed.points[0],bed.points[1],state.pxPerCm);
-        const h=edgeLenCm(bed.points[1],bed.points[2],state.pxPerCm);
-        ctx.fillText(`${fmtDim(w)} × ${fmtDim(h)}`,0,0);
+        // Rectangle: show width × height
+        const w = edgeLenCm(bed.points[0], bed.points[1], state.pxPerCm);
+        const h = edgeLenCm(bed.points[1], bed.points[2], state.pxPerCm);
+        ctx.fillText(`${fmtDim(w)} × ${fmtDim(h)}`, 0, 0);
       } else {
-        const areaCm2=shoelaceArea(bed.points)/(state.pxPerCm*state.pxPerCm);
-        ctx.fillText(`~${(areaCm2/10000).toFixed(2)}m²`,0,0);
+        // Polygon: show approximate area
+        const areaCm2 = shoelaceArea(bed.points) / (state.pxPerCm * state.pxPerCm);
+        ctx.fillText(`~${(areaCm2 / 10000).toFixed(2)}m²`, 0, 0);
       }
     }
     ctx.restore();
   }
-  if (sel&&dm==='dims'&&state.pxPerCm) {
-    ctx.save(); ctx.font=`${10/viewScale}px DM Sans`; ctx.textAlign='center'; ctx.textBaseline='middle';
-    for(let i=0;i<bed.points.length;i++){
-      const a=bed.points[i],b=bed.points[(i+1)%bed.points.length];
-      const mx=(a.x+b.x)/2,my=(a.y+b.y)/2;
-      const len=edgeLenCm(a,b,state.pxPerCm);
-      const dx=b.x-a.x,dy=b.y-a.y,mag=Math.sqrt(dx*dx+dy*dy)||1;
-      const nx=-dy/mag*14/viewScale,ny=dx/mag*14/viewScale;
-      const label=fmtDim(len),tw=ctx.measureText(label).width,pad=3/viewScale;
-      ctx.fillStyle='rgba(255,255,255,0.82)';
-      ctx.fillRect(mx+nx-tw/2-pad,my+ny-6/viewScale,tw+pad*2,12/viewScale);
-      ctx.fillStyle='rgba(44,36,22,0.85)'; ctx.fillText(label,mx+nx,my+ny);
+
+  // ── 6. Draw edge dimension labels (only when selected + dims mode) ──
+  if (isSelected && displayMode === 'dims' && state.pxPerCm) {
+    ctx.save();
+    ctx.font = `${10 / viewScale}px DM Sans`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+
+    for (let i = 0; i < bed.points.length; i++) {
+      const a = bed.points[i];
+      const b = bed.points[(i + 1) % bed.points.length]; // wrap to first point
+
+      // Midpoint of this edge
+      const midX = (a.x + b.x) / 2;
+      const midY = (a.y + b.y) / 2;
+
+      const len = edgeLenCm(a, b, state.pxPerCm);
+
+      // Offset label perpendicular to the edge
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const mag = Math.sqrt(dx * dx + dy * dy) || 1;
+      const offsetX = (-dy / mag) * 14 / viewScale;
+      const offsetY = (dx / mag) * 14 / viewScale;
+
+      // Draw white pill background behind label
+      const label = fmtDim(len);
+      const textWidth = ctx.measureText(label).width;
+      const pad = 3 / viewScale;
+      ctx.fillStyle = 'rgba(255,255,255,0.82)';
+      ctx.fillRect(midX + offsetX - textWidth / 2 - pad, midY + offsetY - 6 / viewScale, textWidth + pad * 2, 12 / viewScale);
+
+      // Draw label text
+      ctx.fillStyle = 'rgba(44,36,22,0.85)';
+      ctx.fillText(label, midX + offsetX, midY + offsetY);
     }
     ctx.restore();
   }

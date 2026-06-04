@@ -4,8 +4,14 @@ export function Header() {
   const { history, historyIdx, undo, redo } = useGardenStore();
   function exportData() {
     const { appData } = useGardenStore.getState();
-    const blob = new Blob([JSON.stringify(appData,null,2)],{type:'application/json'});
-    const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='garden-plan.json'; a.click();
+    const blob = new Blob(
+      [JSON.stringify(appData,null,2)], 
+      {type: 'application/json'} 
+    );
+    const a = document.createElement('a'); 
+    a.href=URL.createObjectURL(blob); 
+    a.download='garden-plan.json'; 
+    a.click();
   }
   return (
     <header className="app-header">
