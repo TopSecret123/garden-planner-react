@@ -39,7 +39,8 @@
 .right-panel__inner{
   flex:1;
   overflow-y:auto;
-  min-width:var(--right-panel-w);
+  min-width: 0;
+  overflow: hidden;
 }
 .right-panel__section{
   padding:14px 14px 12px;
