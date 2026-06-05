@@ -38,7 +38,7 @@
 }
 .right-panel__inner{
   flex:1;
-  overflow-y:auto;
+  
   min-width: 0;
   overflow: hidden;
 }
