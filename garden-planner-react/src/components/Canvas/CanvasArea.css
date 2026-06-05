@@ -14,3 +14,17 @@
   left:0;
   touch-action:none;
 }
+
+
+@media (max-width: 768px) {
+  .side-panel, .right-panel {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 20;
+  }
+  .side-panel { left: 0; }
+  .right-panel { right: 0; }
+  
+  /* start collapsed on mobile */
+}
