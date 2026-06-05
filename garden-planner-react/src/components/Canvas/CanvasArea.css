@@ -38,15 +38,15 @@
     
     width: 25px;
     left: -20px;
-    position: sticky;
+    position: relative;
     
   }
   .side-panel.is-collapsed .side-panel__collapse {
     min-width: 10px;
     
     width: 25px;
-    left: -20px;
-    position: relative;
+    left: 0px;
+    position: absolute;
   }
   
   /* start collapsed on mobile */
