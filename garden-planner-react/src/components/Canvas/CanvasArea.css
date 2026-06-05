@@ -6,6 +6,7 @@
   background-image:radial-gradient(circle at 1px 1px,var(--canvas-dot) 1px,transparent 0);
   background-size:24px 24px;
   transition:background .25s;
+  touch-action: none;
 }
 .canvas-area__canvas{
   position:absolute;
