@@ -7,3 +7,12 @@
   z-index:10;
   flex-wrap:wrap;
 }
+
+/* moved for mobile - patch solution for now */
+@media (max-width: 768px) {
+  .canvas-toolbar {
+    position: absolute;
+    top: -200px;
+  }
+
+}

@@ -5,7 +5,7 @@
   border-right:1px solid var(--border);
   display:flex;
   flex-direction:column;
-  overflow:hidden;
+  overflow:visible;
   z-index:5;
   transition:width .22s ease,min-width .22s ease;
   position:relative;
