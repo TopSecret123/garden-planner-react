@@ -25,7 +25,9 @@
   }
   .side-panel { left: 0; }
   .right-panel { right: 0; }
-  .right-panel.is-collapsed{ width: 0;}
+  .right-panel.is-collapsed{ width: 0;
+  min-width: 0;
+  max-width: 0;}
   
   /* start collapsed on mobile */
 }
