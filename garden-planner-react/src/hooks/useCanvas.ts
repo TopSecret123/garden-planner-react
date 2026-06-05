@@ -347,20 +347,25 @@ export function useCanvas(
   }, []);
 
   // Re-render when the browser window is resized
+
   useEffect(() => {
+    const canvas = canvasRef.current!;
+    const parent = canvas.parentElement;
+    if (!parent) return;
+  
     function handleResize() {
-      const canvas = canvasRef.current!;
-      const parent = canvas.parentElement;
-      if (!parent) return;
-      canvas.width  = parent.clientWidth;
-      canvas.height = parent.clientHeight;
+      canvas.width  = parent!.clientWidth;
+      canvas.height = parent!.clientHeight;
       renderRef.current();
     }
+  
     handleResize();
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+  
+    const ro = new ResizeObserver(handleResize);
+    ro.observe(parent);
+  
+    return () => ro.disconnect();
   }, []);
-
 
   // ═══════════════════════════════════════════════════════════════
   // SECTION 5: MOUSE EVENT HANDLERS
