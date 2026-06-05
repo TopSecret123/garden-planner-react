@@ -33,23 +33,23 @@
     max-width: 0;
     width: 0;
   }
-  .right-panel__collapse {
+  .right-panel.is-collapsed .right-panel__collapse {
     min-width: 10px;
     
     width: 25px;
     left: -20px;
-    top: -80;
+    position: sticky;
     
   }
   .side-panel.is-collapsed .side-panel__collapse {
     min-width: 10px;
     
     width: 25px;
-    left: 0px;
-    position: absolute;
+    left: -20px;
+    position: relative;
   }
   
   /* start collapsed on mobile */
 
-  
+
 }
