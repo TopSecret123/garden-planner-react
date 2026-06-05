@@ -42,8 +42,7 @@
   flex-direction:column;
   flex:1;
   overflow:hidden;
-  min-width:var(--panel-w);
-}
+  min-width: 0;
 .side-panel__tabs{
   display:flex;
   border-bottom:1px solid var(--border);
